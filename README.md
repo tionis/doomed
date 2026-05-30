@@ -1,6 +1,6 @@
 # Judged by AI
 
-Host-authoritative AI survival party game.
+Bad plans die fast. Good plans get judged anyway.
 
 This version is a static React app. InstantDB handles realtime room state, and the
 session leader's browser runs the AI judge with their own token or local

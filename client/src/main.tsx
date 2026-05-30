@@ -136,7 +136,7 @@ function GameApp({
   return (
     <main>
       <header className="topbar">
-        <BrandTitle subtitle="Host-authoritative AI survival party game. Guests join by code." />
+        <BrandTitle subtitle="Bad plans die fast. Good plans get judged anyway." />
         {room && (
           <button className="secondary" onClick={() => openRoom("")}>
             Home
