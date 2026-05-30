@@ -1,7 +1,7 @@
 import { createRoot } from "react-dom/client";
 import { id, lookup, tx } from "@instantdb/react";
 import type { AuthState, User } from "@instantdb/react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { db, instantAppId } from "./instant";
 import {
   bannedWordsForRound,
@@ -12,13 +12,21 @@ import {
   pickScenario,
 } from "./game";
 import {
+  aiProviderPresets,
+  completeOpenRouterOAuthFromUrl,
+  consumeOpenRouterOAuthNotice,
   defaultAiSettings,
   judgeSubmission,
+  listAiModels,
   loadAiSettings,
+  openRouterOAuthDebug,
   saveAiSettings,
+  startOpenRouterOAuth,
+  testAiEndpoint,
 } from "./ai";
 import { createDemoState, type DemoMode } from "./demo";
 import type { AdminIdentity, AiSettings, Judgment, Player, Room, Submission } from "./types";
+import type { AiModel } from "./ai";
 import "./styles.css";
 
 const localClientId = getLocal("jba.clientId", () => crypto.randomUUID());
@@ -96,6 +104,10 @@ function GameApp({
   }, [me?.id]);
 
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [narratorEnabled, setNarratorEnabled] = useState(
+    localStorage.getItem("jba.narrator") === "1",
+  );
   const isAdmin = Boolean((adminIdentityQuery.data?.admins ?? []).length);
   const openRoom = (code: string) => {
     setActiveCode(code);
@@ -105,19 +117,32 @@ function GameApp({
     window.history.replaceState(null, "", url);
   };
 
+  useEffect(() => {
+    localStorage.setItem("jba.narrator", narratorEnabled ? "1" : "0");
+  }, [narratorEnabled]);
+
+  useEffect(() => {
+    const storedNotice = consumeOpenRouterOAuthNotice();
+    if (storedNotice) setNotice(storedNotice);
+    void completeOpenRouterOAuthFromUrl()
+      .then((message) => {
+        if (message) setNotice(message);
+      })
+      .catch((error) => {
+        setError(error instanceof Error ? error.message : "OpenRouter OAuth failed");
+      });
+  }, []);
+
   return (
     <main>
       <header className="topbar">
-        <div>
-          <h1>Judged by AI</h1>
-          <p>Host-authoritative AI survival party game. Guests join by code.</p>
-        </div>
+        <BrandTitle subtitle="Host-authoritative AI survival party game. Guests join by code." />
         {room && (
           <button className="secondary" onClick={() => openRoom("")}>
-            Leave view
+            Home
           </button>
         )}
-        {isAdmin && !adminEnabled && (
+        {isAdmin && !adminEnabled && !room && (
           <button
             className="secondary"
             onClick={() => {
@@ -140,7 +165,7 @@ function GameApp({
               window.location.reload();
             }}
           >
-            App
+            Home
           </button>
         )}
         <AuthWidget auth={auth} onError={setError} />
@@ -149,6 +174,11 @@ function GameApp({
       {error && (
         <button className="error" onClick={() => setError("")}>
           {error}
+        </button>
+      )}
+      {notice && (
+        <button className="notice-message" onClick={() => setNotice("")}>
+          {notice}
         </button>
       )}
 
@@ -191,9 +221,23 @@ function GameApp({
           onError={setError}
           readOnly={false}
           playersLoaded={!dataQuery.isLoading}
+          narratorEnabled={narratorEnabled}
+          onNarratorChange={setNarratorEnabled}
         />
       )}
     </main>
+  );
+}
+
+function BrandTitle({ subtitle }: { subtitle?: string }) {
+  return (
+    <div className="brand">
+      <img className="brand-logo" src="/logo.svg" alt="" />
+      <div>
+        <h1>Judged by AI</h1>
+        {subtitle && <p>{subtitle}</p>}
+      </div>
+    </div>
   );
 }
 
@@ -207,7 +251,7 @@ function SetupScreen({
   return (
     <main>
       <section className="panel auth">
-        <h1>Judged by AI</h1>
+        <BrandTitle />
         <h2>InstantDB app required</h2>
         <p className="muted">
           Set <code>VITE_INSTANT_APP_ID</code> in <code>.env</code>, then restart
@@ -230,10 +274,7 @@ function DemoView({ mode, onExit }: { mode: DemoMode; onExit: () => void }) {
   return (
     <main>
       <header className="topbar">
-        <div>
-          <h1>Judged by AI</h1>
-          <p>Demo mode for status updates. No InstantDB writes, no AI calls.</p>
-        </div>
+        <BrandTitle subtitle="Demo mode for status updates. No InstantDB writes, no AI calls." />
         <button className="secondary" onClick={onExit}>
           Exit demo
         </button>
@@ -254,6 +295,8 @@ function DemoView({ mode, onExit }: { mode: DemoMode; onExit: () => void }) {
         onError={() => undefined}
         readOnly
         playersLoaded
+        narratorEnabled={false}
+        onNarratorChange={() => undefined}
       />
     </main>
   );
@@ -341,7 +384,10 @@ function Home({
     <>
       <section className="homegrid">
         <div className="panel">
-          <h2>Create room</h2>
+          <div className="section-heading">
+            <h2>Create room</h2>
+            <AiSettingsLauncher compact />
+          </div>
           <label>
             Host name
             <input value={hostName} onChange={(event) => setHostName(event.target.value)} />
@@ -1117,6 +1163,8 @@ function RoomView({
   onError,
   readOnly,
   playersLoaded,
+  narratorEnabled,
+  onNarratorChange,
 }: {
   room: Room;
   players: Player[];
@@ -1129,6 +1177,8 @@ function RoomView({
   onError: (error: string) => void;
   readOnly: boolean;
   playersLoaded: boolean;
+  narratorEnabled: boolean;
+  onNarratorChange: (enabled: boolean) => void;
 }) {
   useEffect(() => {
     if (readOnly || !playersLoaded || me) return;
@@ -1223,7 +1273,8 @@ function RoomView({
           </div>
         )}
         <PlayerList players={players} submittedIds={roundSubmissions.map((s) => s.playerId)} />
-        {(isHost || canControlRound) && <AiSettingsPanel />}
+        <NarratorToggle enabled={narratorEnabled} onChange={onNarratorChange} />
+        {(isHost || canControlRound) && <AiSettingsLauncher />}
       </aside>
       <section className="stage">
         {room.status === "lobby" ? (
@@ -1250,6 +1301,7 @@ function RoomView({
             activePlayer={activePlayer}
             onError={onError}
             readOnly={readOnly}
+            narratorEnabled={narratorEnabled}
           />
         )}
       </section>
@@ -1263,6 +1315,7 @@ function PlayerList({ players, submittedIds }: { players: Player[]; submittedIds
       {players.map((player) => (
         <div className="player" key={player.id}>
           <span className={Date.now() - player.lastSeenAt < 45_000 ? "dot on" : "dot"} />
+          <Avatar player={player} size="sm" />
           <span>{player.name}</span>
           {player.isHost && <small>Host</small>}
           {submittedIds.includes(player.id) && <small>Submitted</small>}
@@ -1270,6 +1323,25 @@ function PlayerList({ players, submittedIds }: { players: Player[]; submittedIds
         </div>
       ))}
     </div>
+  );
+}
+
+function NarratorToggle({
+  enabled,
+  onChange,
+}: {
+  enabled: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  return (
+    <label className="narrator-toggle">
+      <input
+        type="checkbox"
+        checked={enabled}
+        onChange={(event) => onChange(event.target.checked)}
+      />
+      <span>Narrator</span>
+    </label>
   );
 }
 
@@ -1342,6 +1414,7 @@ function RoundView({
   activePlayer,
   onError,
   readOnly,
+  narratorEnabled,
 }: {
   room: Room;
   players: Player[];
@@ -1353,6 +1426,7 @@ function RoundView({
   activePlayer?: Player;
   onError: (error: string) => void;
   readOnly: boolean;
+  narratorEnabled: boolean;
 }) {
   return (
     <>
@@ -1394,6 +1468,7 @@ function RoundView({
           judgments={judgments}
           canControl={canControl}
           readOnly={readOnly}
+          narratorEnabled={narratorEnabled}
         />
       )}
       {(room.status === "scoreboard" || room.status === "finished") && (
@@ -1815,6 +1890,7 @@ function RevealPanel({
   judgments,
   canControl,
   readOnly,
+  narratorEnabled,
 }: {
   room: Room;
   players: Player[];
@@ -1822,6 +1898,7 @@ function RevealPanel({
   judgments: Judgment[];
   canControl: boolean;
   readOnly: boolean;
+  narratorEnabled: boolean;
 }) {
   const visiblePlayers = players.slice(0, room.revealIndex);
   async function advance() {
@@ -1834,7 +1911,13 @@ function RevealPanel({
   }
   return (
     <div>
-      <ResultCards players={visiblePlayers} submissions={submissions} judgments={judgments} />
+      <ResultCards
+        players={visiblePlayers}
+        submissions={submissions}
+        judgments={judgments}
+        autoNarrate={narratorEnabled}
+        suspenseReveal
+      />
       {canControl && <button onClick={advance}>Advance reveal</button>}
     </div>
   );
@@ -1893,6 +1976,7 @@ function Scoreboard({
         {leaders.map((player, index) => (
           <div className="rank" key={player.id}>
             <span>{index + 1}</span>
+            <Avatar player={player} size="sm" />
             <strong>{player.name}</strong>
             <b>{player.score}</b>
           </div>
@@ -1972,6 +2056,7 @@ function GameSummary({
         {leaders.map((player, index) => (
           <div className="rank" key={player.id}>
             <span>{index + 1}</span>
+            <Avatar player={player} size="sm" />
             <strong>{player.name}</strong>
             <b>{player.score}</b>
           </div>
@@ -2005,7 +2090,12 @@ function GameSummary({
                 const judgment = judgmentsByPlayer.get(submission.playerId);
                 return (
                   <article className="result" key={submission.id}>
-                    <h3>{playerNames.get(submission.playerId) ?? "Player"}</h3>
+                    <h3 className="result-title">
+                      <Avatar
+                        player={allPlayers.find((player) => player.id === submission.playerId)}
+                      />
+                      {playerNames.get(submission.playerId) ?? "Player"}
+                    </h3>
                     <p className="submission">{submission.text}</p>
                     {judgment ? (
                       <>
@@ -2094,43 +2184,63 @@ function ResultCards({
   players,
   submissions,
   judgments,
+  autoNarrate = false,
+  suspenseReveal = false,
 }: {
   players: Player[];
   submissions: Submission[];
   judgments: Judgment[];
+  autoNarrate?: boolean;
+  suspenseReveal?: boolean;
 }) {
+  const lastNarratedId = useRef<string | null>(null);
   const byPlayer = useMemo(() => {
     return {
       submissions: new Map(submissions.map((submission) => [submission.playerId, submission])),
       judgments: new Map(judgments.map((judgment) => [judgment.playerId, judgment])),
     };
   }, [submissions, judgments]);
+  const visibleEntries = players
+    .filter((player) => byPlayer.submissions.has(player.id) || byPlayer.judgments.has(player.id))
+    .map((player) => ({
+      player,
+      submission: byPlayer.submissions.get(player.id),
+      judgment: byPlayer.judgments.get(player.id),
+    }));
+  const latestJudgmentId = [...visibleEntries].reverse().find((entry) => entry.judgment)?.judgment?.id;
+
+  useEffect(() => {
+    if (!autoNarrate) return;
+    const latest = [...visibleEntries].reverse().find((entry) => entry.judgment);
+    if (!latest?.judgment || latest.judgment.id === lastNarratedId.current) return;
+    lastNarratedId.current = latest.judgment.id;
+    narrateJudgment(latest.player, latest.judgment);
+  }, [autoNarrate, visibleEntries]);
 
   return (
     <div className="results">
-      {players
-        .filter((player) => byPlayer.submissions.has(player.id) || byPlayer.judgments.has(player.id))
-        .map((player) => {
-          const submission = byPlayer.submissions.get(player.id);
-          const judgment = byPlayer.judgments.get(player.id);
+      {visibleEntries
+        .map(({ player, submission, judgment }) => {
           return (
-            <article className="result" key={player.id}>
-              <h3>{player.name}</h3>
+            <article
+              className={judgment?.verdict === "perished" ? "result death-card" : "result"}
+              key={player.id}
+            >
+              <h3 className="result-title">
+                <Avatar player={player} doomed={judgment?.verdict === "perished"} />
+                {player.name}
+              </h3>
               {submission && <p className="submission">{submission.text}</p>}
               {judgment && (
                 <>
                   <div className={`verdict ${judgment.verdict}`}>
                     {judgment.verdict.replace("_", " ")}
                   </div>
-                  <p>{judgment.outcome}</p>
-                  <small>{judgment.judgeComment}</small>
-                  <div className="breakdown">
-                    <span>Logic {judgment.logicScore}/10</span>
-                    <span>Creativity {judgment.creativityScore}/10</span>
-                    <span>Feasibility {judgment.feasibilityScore}/10</span>
-                    <span>Humor {judgment.humorScore}/5</span>
-                    <strong>Points +{judgment.pointsAwarded}</strong>
-                  </div>
+                  <JudgmentReveal
+                    player={player}
+                    judgment={judgment}
+                    suspense={suspenseReveal && judgment.id === latestJudgmentId}
+                  />
                 </>
               )}
             </article>
@@ -2140,8 +2250,158 @@ function ResultCards({
   );
 }
 
-function AiSettingsPanel() {
+function JudgmentReveal({
+  player,
+  judgment,
+  suspense,
+}: {
+  player: Player;
+  judgment: Judgment;
+  suspense: boolean;
+}) {
+  const [visibleChars, setVisibleChars] = useState(suspense ? 0 : judgment.outcome.length);
+
+  useEffect(() => {
+    if (!suspense) {
+      setVisibleChars(judgment.outcome.length);
+      return;
+    }
+
+    setVisibleChars(0);
+    const stepMs = Math.max(18, Math.min(42, Math.floor(2400 / Math.max(1, judgment.outcome.length))));
+    const interval = window.setInterval(() => {
+      setVisibleChars((current) => {
+        if (current >= judgment.outcome.length) {
+          window.clearInterval(interval);
+          return current;
+        }
+        return current + 1;
+      });
+    }, stepMs);
+
+    return () => window.clearInterval(interval);
+  }, [judgment.id, judgment.outcome, suspense]);
+
+  const complete = visibleChars >= judgment.outcome.length;
+
+  return (
+    <>
+      <p className={suspense && !complete ? "typed-outcome typing" : "typed-outcome"}>
+        {judgment.outcome.slice(0, visibleChars)}
+        {suspense && !complete && <span className="type-cursor">|</span>}
+      </p>
+      {complete && (
+        <>
+          <small>{judgment.judgeComment}</small>
+          <div className="breakdown">
+            <span>Logic {judgment.logicScore}/10</span>
+            <span>Creativity {judgment.creativityScore}/10</span>
+            <span>Feasibility {judgment.feasibilityScore}/10</span>
+            <span>Humor {judgment.humorScore}/5</span>
+            <strong>Points +{judgment.pointsAwarded}</strong>
+          </div>
+          <button className="secondary narrator-button" onClick={() => narrateJudgment(player, judgment)}>
+            Narrate
+          </button>
+        </>
+      )}
+    </>
+  );
+}
+
+function Avatar({
+  player,
+  size,
+  doomed = false,
+}: {
+  player?: Player;
+  size?: "sm";
+  doomed?: boolean;
+}) {
+  const seed = player?.clientId ?? player?.id ?? "unknown";
+  const palette = avatarPalette(seed);
+  const initial = (player?.name ?? "?").trim().slice(0, 1).toUpperCase() || "?";
+  return (
+    <span
+      className={[
+        "avatar",
+        size === "sm" ? "avatar-sm" : "",
+        doomed ? "avatar-doomed" : "",
+      ].filter(Boolean).join(" ")}
+      style={{ background: palette }}
+      aria-hidden="true"
+    >
+      {initial}
+    </span>
+  );
+}
+
+function avatarPalette(seed: string) {
+  const palettes = [
+    "linear-gradient(135deg, #1f6f78, #91d0c9)",
+    "linear-gradient(135deg, #8b3f6b, #f1a7c6)",
+    "linear-gradient(135deg, #4c6f1f, #d8df73)",
+    "linear-gradient(135deg, #8b2525, #f39b72)",
+    "linear-gradient(135deg, #355d8f, #9bbcff)",
+    "linear-gradient(135deg, #3f6b45, #a9e5a4)",
+  ];
+  let hash = 0;
+  for (const char of seed) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return palettes[hash % palettes.length];
+}
+
+function narrateJudgment(player: Player, judgment: Judgment) {
+  if (!("speechSynthesis" in window)) return;
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(
+    `${player.name}. ${judgment.verdict.replace("_", " ")}. ${judgment.outcome}`,
+  );
+  utterance.rate = 0.95;
+  utterance.pitch = judgment.verdict === "perished" ? 0.75 : 1;
+  window.speechSynthesis.speak(utterance);
+}
+
+function AiSettingsLauncher({ compact = false }: { compact?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const settings = loadAiSettings();
+  const preset = aiProviderPresets.find((candidate) => candidate.id === settings.provider);
+
+  return (
+    <>
+      <button className="secondary ai-settings-open" onClick={() => setOpen(true)}>
+        AI settings
+        {!compact && (
+          <span>
+            {(preset?.label ?? settings.provider) || "Custom"} · {settings.model || "No model"}
+          </span>
+        )}
+      </button>
+      {open && <AiSettingsModal onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
+function AiSettingsModal({ onClose }: { onClose: () => void }) {
   const [settings, setSettings] = useState<AiSettings>(() => loadAiSettings());
+  const [models, setModels] = useState<AiModel[]>([]);
+  const [modelStatus, setModelStatus] = useState("");
+  const [testStatus, setTestStatus] = useState("");
+  const [oauthDebug, setOauthDebug] = useState<Record<string, unknown> | null>(() => openRouterOAuthDebug());
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [connectingOpenRouter, setConnectingOpenRouter] = useState(false);
+
+  const selectedPreset =
+    aiProviderPresets.find((preset) => preset.id === settings.provider) ?? aiProviderPresets.at(-1)!;
+  const isMock = settings.provider === "mock" || settings.model === "mock";
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
 
   function update(patch: Partial<AiSettings>) {
     const next = { ...settings, ...patch };
@@ -2149,48 +2409,223 @@ function AiSettingsPanel() {
     saveAiSettings(next);
   }
 
-  function useMock() {
-    update({ ...defaultAiSettings, provider: "mock", baseUrl: "", apiKey: "", model: "mock" });
+  function selectPreset(presetId: string) {
+    const preset = aiProviderPresets.find((candidate) => candidate.id === presetId);
+    if (!preset) return;
+    setModels([]);
+    setModelStatus("");
+    setTestStatus("");
+    update({
+      provider: preset.id,
+      baseUrl: preset.baseUrl,
+      model: preset.model,
+      responseFormat: preset.responseFormat,
+      ...(preset.id === "mock" ? { apiKey: "" } : {}),
+      httpReferer: settings.httpReferer || defaultAiSettings.httpReferer,
+      appTitle: settings.appTitle || defaultAiSettings.appTitle,
+    });
+  }
+
+  async function loadModels() {
+    setLoadingModels(true);
+    setModelStatus("");
+    setTestStatus("");
+    try {
+      const loaded = await listAiModels(settings);
+      setModels(loaded);
+      if (!loaded.length) {
+        setModelStatus("Endpoint responded, but did not return any models.");
+      } else {
+        setModelStatus(`Loaded ${loaded.length} model${loaded.length === 1 ? "" : "s"}.`);
+        if (!loaded.some((model) => model.id === settings.model)) {
+          update({ model: loaded[0].id });
+        }
+      }
+    } catch (error) {
+      setModelStatus(error instanceof Error ? error.message : "Could not load models.");
+    } finally {
+      setLoadingModels(false);
+    }
+  }
+
+  async function testEndpoint() {
+    setTesting(true);
+    setTestStatus("");
+    try {
+      setTestStatus(await testAiEndpoint(settings));
+    } catch (error) {
+      setTestStatus(error instanceof Error ? error.message : "Endpoint test failed.");
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  async function connectOpenRouter() {
+    setConnectingOpenRouter(true);
+    setTestStatus("");
+    setOauthDebug(null);
+    try {
+      await startOpenRouterOAuth();
+    } catch (error) {
+      setConnectingOpenRouter(false);
+      setTestStatus(error instanceof Error ? error.message : "Could not start OpenRouter OAuth.");
+    }
   }
 
   return (
-    <div className="ai-settings">
-      <h3>AI judge</h3>
-      <label>
-        Provider
-        <input value={settings.provider} onChange={(event) => update({ provider: event.target.value })} />
-      </label>
-      <label>
-        Base URL
-        <input value={settings.baseUrl} onChange={(event) => update({ baseUrl: event.target.value })} />
-      </label>
-      <label>
-        Model
-        <input value={settings.model} onChange={(event) => update({ model: event.target.value })} />
-      </label>
-      <label>
-        Token
-        <input
-          type="password"
-          value={settings.apiKey}
-          onChange={(event) => update({ apiKey: event.target.value })}
-        />
-      </label>
-      <label>
-        JSON mode
-        <select
-          value={settings.responseFormat}
-          onChange={(event) =>
-            update({ responseFormat: event.target.value as AiSettings["responseFormat"] })
-          }
-        >
-          <option value="json_object">On</option>
-          <option value="none">Off</option>
-        </select>
-      </label>
-      <button className="secondary" onClick={useMock}>
-        Use mock
-      </button>
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <section
+        className="modal ai-settings-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="ai-settings-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="modal-heading">
+          <div>
+            <span className="eyebrow">Host browser</span>
+            <h2 id="ai-settings-title">AI judge settings</h2>
+            <p className="muted">
+              Saved in this browser and used when the host runs judging.
+            </p>
+          </div>
+          <button className="secondary" onClick={onClose}>
+            Close
+          </button>
+        </div>
+
+        <div className="provider-grid" role="list" aria-label="AI provider presets">
+          {aiProviderPresets.map((preset) => (
+            <button
+              className={settings.provider === preset.id ? "provider-card selected" : "provider-card"}
+              key={preset.id}
+              onClick={() => selectPreset(preset.id)}
+              type="button"
+            >
+              <strong>{preset.label}</strong>
+              <span>{preset.description}</span>
+              {preset.needsToken && <small>Token required</small>}
+            </button>
+          ))}
+        </div>
+
+        <div className="ai-form">
+          <label>
+            Base URL
+            <input
+              disabled={isMock}
+              placeholder="https://api.example.com/v1"
+              value={settings.baseUrl}
+              onChange={(event) =>
+                update({
+                  provider: settings.provider === "mock" ? "custom" : settings.provider,
+                  baseUrl: event.target.value,
+                })
+              }
+            />
+          </label>
+          <label>
+            API token
+            <input
+              autoComplete="off"
+              disabled={isMock}
+              placeholder={selectedPreset.needsToken ? "Required" : "Optional"}
+              type="password"
+              value={settings.apiKey}
+              onChange={(event) => update({ apiKey: event.target.value })}
+            />
+            <span className={settings.apiKey ? "field-hint ok" : "field-hint"}>
+              {settings.apiKey ? "Token saved in this browser." : "No token saved."}
+            </span>
+          </label>
+          <label>
+            Model
+            <input
+              disabled={isMock}
+              placeholder="Choose below or type a model id"
+              value={settings.model}
+              onChange={(event) => update({ model: event.target.value })}
+            />
+          </label>
+          <label>
+            Discovered models
+            <select
+              disabled={isMock || models.length === 0}
+              value={models.some((model) => model.id === settings.model) ? settings.model : ""}
+              onChange={(event) => update({ model: event.target.value })}
+            >
+              <option value="">Manual model</option>
+              {models.map((model) => (
+                <option value={model.id} key={model.id}>
+                  {model.id}
+                  {model.ownedBy ? ` (${model.ownedBy})` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <div className="ai-actions">
+          <button
+            className="secondary"
+            disabled={connectingOpenRouter}
+            onClick={connectOpenRouter}
+          >
+            {connectingOpenRouter ? "Opening OpenRouter..." : "Connect OpenRouter"}
+          </button>
+          <button className="secondary" disabled={isMock || loadingModels} onClick={loadModels}>
+            {loadingModels ? "Loading models..." : "Load models"}
+          </button>
+          <button disabled={testing} onClick={testEndpoint}>
+            {testing ? "Testing..." : "Test endpoint"}
+          </button>
+        </div>
+
+        {(modelStatus || testStatus) && (
+          <div className="status-stack">
+            {modelStatus && <p className="submit-status">{modelStatus}</p>}
+            {testStatus && <p className="submit-status ok">{testStatus}</p>}
+          </div>
+        )}
+        {!settings.apiKey && oauthDebug && (
+          <p className="submit-status">
+            Last OpenRouter callback: code {oauthDebug.callbackHadCode ? "seen" : "missing"},
+            verifier {oauthDebug.hadVerifier ? "found" : "missing"}.
+          </p>
+        )}
+
+        <details className="advanced-settings">
+          <summary>Advanced request options</summary>
+          <div className="ai-form">
+            <label>
+              JSON mode
+              <select
+                value={settings.responseFormat}
+                onChange={(event) =>
+                  update({ responseFormat: event.target.value as AiSettings["responseFormat"] })
+                }
+              >
+                <option value="json_object">On</option>
+                <option value="none">Off</option>
+              </select>
+            </label>
+            <label>
+              HTTP-Referer
+              <input
+                value={settings.httpReferer}
+                onChange={(event) => update({ httpReferer: event.target.value })}
+              />
+            </label>
+            <label>
+              X-Title
+              <input
+                value={settings.appTitle}
+                onChange={(event) => update({ appTitle: event.target.value })}
+              />
+            </label>
+          </div>
+        </details>
+      </section>
     </div>
   );
 }
@@ -2301,4 +2736,17 @@ function formatDuration(ms: number) {
   return `${Math.floor(hours / 24)}d`;
 }
 
+function registerServiceWorker() {
+  if (import.meta.env.DEV || !("serviceWorker" in navigator)) return;
+  const localHostnames = new Set(["localhost", "127.0.0.1", "[::1]"]);
+  const canRegister =
+    window.location.protocol === "https:" || localHostnames.has(window.location.hostname);
+  if (!canRegister) return;
+
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+  });
+}
+
+registerServiceWorker();
 createRoot(document.getElementById("root")!).render(<App />);

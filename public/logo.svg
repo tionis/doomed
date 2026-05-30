@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Judged by AI logo</title>
+  <desc id="desc">A stylized judge eye inside a survival badge.</desc>
+  <defs>
+    <linearGradient id="badge" x1="80" y1="52" x2="436" y2="456" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#174f58"/>
+      <stop offset="0.56" stop-color="#1f6f78"/>
+      <stop offset="1" stop-color="#8b2525"/>
+    </linearGradient>
+    <linearGradient id="eye" x1="142" y1="198" x2="374" y2="318" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f7f3df"/>
+      <stop offset="1" stop-color="#ffffff"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#172026"/>
+  <path d="M256 54 418 116v124c0 104-64 178-162 218C158 418 94 344 94 240V116L256 54Z" fill="url(#badge)"/>
+  <path d="M256 98 382 146v94c0 78-46 136-126 172-80-36-126-94-126-172v-94l126-48Z" fill="none" stroke="#f7f3df" stroke-width="18" stroke-linejoin="round" opacity=".9"/>
+  <path d="M136 260c32-50 72-75 120-75s88 25 120 75c-32 50-72 75-120 75s-88-25-120-75Z" fill="url(#eye)"/>
+  <circle cx="256" cy="260" r="54" fill="#172026"/>
+  <circle cx="256" cy="260" r="24" fill="#9fd0ca"/>
+  <path d="M196 159h120" stroke="#f7f3df" stroke-width="24" stroke-linecap="round"/>
+  <path d="M256 133v52" stroke="#f7f3df" stroke-width="24" stroke-linecap="round"/>
+  <path d="M198 382h116" stroke="#f7f3df" stroke-width="24" stroke-linecap="round"/>
+  <path d="M256 335v47" stroke="#f7f3df" stroke-width="24" stroke-linecap="round"/>
+</svg>

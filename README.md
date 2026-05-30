@@ -138,6 +138,13 @@ bun run build
 Deploy `dist/client` to any static host. Configure `VITE_INSTANT_APP_ID` at build
 time.
 
+The app includes a web manifest, service worker, favicon, and install icons for
+PWA usage. Regenerate PNG icons after changing `public/logo.svg`:
+
+```bash
+bun run icons
+```
+
 ## Files
 
 - `instant.schema.ts` defines InstantDB entities and indexed query fields.
