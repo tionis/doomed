@@ -232,7 +232,7 @@ function GameApp({
 function BrandTitle({ subtitle }: { subtitle?: string }) {
   return (
     <div className="brand">
-      <img className="brand-logo" src="/logo.svg" alt="" />
+      <img className="brand-logo" src={assetPath("logo.svg")} alt="" />
       <div>
         <h1>Judged by AI</h1>
         {subtitle && <p>{subtitle}</p>}
@@ -2744,8 +2744,14 @@ function registerServiceWorker() {
   if (!canRegister) return;
 
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+    navigator.serviceWorker.register(assetPath("sw.js")).catch(() => undefined);
   });
+}
+
+function assetPath(path: string) {
+  const base = import.meta.env.BASE_URL;
+  if (base.startsWith("http")) return new URL(path, base).toString();
+  return `${base}${path}`.replace(/\/{2,}/g, "/");
 }
 
 registerServiceWorker();

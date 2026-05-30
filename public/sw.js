@@ -1,12 +1,14 @@
 const cacheName = "judged-by-ai-v1";
+const scopeUrl = self.registration.scope;
+const assetUrl = (path) => new URL(path, scopeUrl).toString();
 const coreAssets = [
-  "/",
-  "/manifest.webmanifest",
-  "/favicon.svg",
-  "/logo.svg",
-  "/icons/icon-192.png",
-  "/icons/icon-512.png",
-  "/icons/maskable-512.png",
+  scopeUrl,
+  assetUrl("manifest.webmanifest"),
+  assetUrl("favicon.svg"),
+  assetUrl("logo.svg"),
+  assetUrl("icons/icon-192.png"),
+  assetUrl("icons/icon-512.png"),
+  assetUrl("icons/maskable-512.png"),
 ];
 
 self.addEventListener("install", (event) => {
@@ -37,10 +39,10 @@ self.addEventListener("fetch", (event) => {
       fetch(request)
         .then((response) => {
           const copy = response.clone();
-          caches.open(cacheName).then((cache) => cache.put("/", copy));
+          caches.open(cacheName).then((cache) => cache.put(scopeUrl, copy));
           return response;
         })
-        .catch(() => caches.match("/")),
+        .catch(() => caches.match(scopeUrl)),
     );
     return;
   }

@@ -138,6 +138,20 @@ bun run build
 Deploy `dist/client` to any static host. Configure `VITE_INSTANT_APP_ID` at build
 time.
 
+### GitHub Pages
+
+The CI workflow deploys `main` to GitHub Pages with the official Pages artifact
+flow. In the repository settings, set Pages source to **GitHub Actions** and add
+this secret:
+
+```text
+VITE_INSTANT_APP_ID=your-instant-app-id
+```
+
+For normal project pages, the workflow builds with `/<repo-name>/` as the Vite
+base path. If you use a custom domain or a `*.github.io` root repository, set a
+repository variable named `VITE_BASE_PATH` to `/`.
+
 The app includes a web manifest, service worker, favicon, and install icons for
 PWA usage. Regenerate PNG icons after changing `public/logo.svg`:
 
