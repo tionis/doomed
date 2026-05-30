@@ -1,8 +1,0 @@
-.data/
-.env
-.git/
-.github/
-dist/
-node_modules/
-*.tsbuildinfo
-npm-debug.log*

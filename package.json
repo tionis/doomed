@@ -1,32 +1,23 @@
 {
   "name": "judged-by-ai",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "packageManager": "bun@1.2.0",
   "scripts": {
-    "dev": "concurrently -n server,client -c blue,green \"bun run dev:server\" \"bun run dev:client\"",
-    "dev:server": "bun --watch server/src/index.ts",
-    "dev:client": "vite --host 0.0.0.0",
+    "dev": "vite --host 0.0.0.0 --port 3000",
     "build": "tsc -b && vite build",
-    "start": "bun server/src/index.ts",
-    "migrate": "bun server/src/db/migrate.ts",
+    "preview": "vite preview --host 0.0.0.0",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@fastify/cookie": "^11.0.2",
-    "@fastify/rate-limit": "^10.3.0",
-    "@fastify/websocket": "^11.0.2",
+    "@instantdb/react": "^0.22.185",
     "@vitejs/plugin-react": "^5.0.0",
-    "concurrently": "^9.2.1",
-    "fastify": "^5.6.2",
-    "jose": "^6.1.0",
-    "openai": "^6.8.1",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "typescript": "^5.9.3",
     "vite": "^7.1.7",
-    "zod": "^4.1.11"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/bun": "^1.2.22",

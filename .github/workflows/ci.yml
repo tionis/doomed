@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    name: Typecheck, build, and container
+    name: Typecheck and build
     runs-on: ubuntu-latest
 
     steps:
@@ -25,11 +25,7 @@ jobs:
       - name: Typecheck
         run: bun run lint
 
-      - name: Build app
+      - name: Build
         run: bun run build
-
-      - name: Install Podman
-        run: sudo apt-get update && sudo apt-get install -y podman
-
-      - name: Build container image with Podman
-        run: podman build --file Containerfile --tag judged-by-ai:${{ github.sha }} .
+        env:
+          VITE_INSTANT_APP_ID: ${{ secrets.VITE_INSTANT_APP_ID }}

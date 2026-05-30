@@ -16,5 +16,5 @@
     "noEmit": true,
     "jsx": "react-jsx"
   },
-  "include": ["server/src", "client/src", "vite.config.ts"]
+  "include": ["client/src", "instant.schema.ts", "instant.perms.ts", "vite.config.ts"]
 }
