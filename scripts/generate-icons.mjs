@@ -33,10 +33,50 @@ function chunk(type, data) {
 function writePng(name, size, { maskable = false } = {}) {
   const pixels = Buffer.alloc((size * 4 + 1) * size);
   const center = size / 2;
-  const cornerRadius = maskable ? size * 0.5 : size * 0.22;
-  const badgeRadius = size * 0.4;
-  const eyeWidth = size * 0.58;
-  const eyeHeight = size * 0.18;
+  const cornerRadius = maskable ? size * 0.5 : size * 0.23;
+  const card = {
+    x: size * 0.15,
+    y: size * 0.13,
+    w: size * 0.7,
+    h: size * 0.72,
+    r: size * 0.055,
+  };
+  const stamp = {
+    cx: size * 0.54,
+    cy: size * 0.59,
+    w: size * 0.62,
+    h: size * 0.19,
+    angle: -12 * Math.PI / 180,
+  };
+
+  function inRoundRect(x, y, rect) {
+    const dx = Math.abs(x - (rect.x + rect.w / 2));
+    const dy = Math.abs(y - (rect.y + rect.h / 2));
+    const cornerDx = Math.max(dx - (rect.w / 2 - rect.r), 0);
+    const cornerDy = Math.max(dy - (rect.h / 2 - rect.r), 0);
+    return cornerDx * cornerDx + cornerDy * cornerDy <= rect.r * rect.r;
+  }
+
+  function inRotatedRect(x, y, rect) {
+    const cos = Math.cos(-rect.angle);
+    const sin = Math.sin(-rect.angle);
+    const dx = x - rect.cx;
+    const dy = y - rect.cy;
+    const rx = dx * cos - dy * sin;
+    const ry = dx * sin + dy * cos;
+    return Math.abs(rx) <= rect.w / 2 && Math.abs(ry) <= rect.h / 2;
+  }
+
+  function rotatedCoords(x, y, rect) {
+    const cos = Math.cos(-rect.angle);
+    const sin = Math.sin(-rect.angle);
+    const dx = x - rect.cx;
+    const dy = y - rect.cy;
+    return {
+      x: dx * cos - dy * sin,
+      y: dx * sin + dy * cos,
+    };
+  }
 
   for (let y = 0; y < size; y += 1) {
     const row = y * (size * 4 + 1);
@@ -50,51 +90,83 @@ function writePng(name, size, { maskable = false } = {}) {
       const cornerDy = Math.max(dy - (center - cornerRadius), 0);
       const insideRoundedRect = cornerDx * cornerDx + cornerDy * cornerDy <= cornerRadius * cornerRadius;
 
-      let r = 23;
-      let g = 32;
-      let b = 38;
+      const t = Math.min(1, Math.max(0, y / size));
+      let r = Math.round(18 + 42 * t);
+      let g = Math.round(61 - 37 * t);
+      let b = Math.round(69 - 34 * t);
       let a = insideRoundedRect ? 255 : 0;
 
-      const shieldY = y - size * 0.08;
-      const shieldWidthAtY = size * (0.26 + 0.46 * Math.max(0, 1 - Math.abs(shieldY - center) / (size * 0.48)));
-      const inShield = Math.abs(x - center) < shieldWidthAtY / 2 && y > size * 0.12 && y < size * 0.9;
-      if (inShield) {
-        const t = y / size;
-        r = Math.round(31 + 108 * Math.max(0, t - 0.45));
-        g = Math.round(111 - 74 * Math.max(0, t - 0.45));
-        b = Math.round(120 - 83 * Math.max(0, t - 0.45));
+      const shadowRect = { ...card, x: card.x + size * 0.025, y: card.y + size * 0.035 };
+      if (inRoundRect(x, y, shadowRect)) {
+        r = 10;
+        g = 16;
+        b = 20;
       }
 
-      const eye = Math.pow((x - center) / eyeWidth, 2) + Math.pow((y - center) / eyeHeight, 2) <= 1;
-      if (eye) {
-        r = 247;
-        g = 243;
+      if (inRoundRect(x, y, card)) {
+        const paperShade = Math.min(1, Math.max(0, (y - card.y) / card.h));
+        r = Math.round(255 - 24 * paperShade);
+        g = Math.round(250 - 28 * paperShade);
+        b = Math.round(240 - 36 * paperShade);
+      }
+
+      const foldStart = card.x + card.w * 0.78;
+      const fold =
+        x > foldStart &&
+        x < card.x + card.w &&
+        y > card.y &&
+        y < card.y + (x - foldStart) * 0.7;
+      if (fold) {
+        r = 207;
+        g = 217;
         b = 223;
       }
 
-      const iris = (x - center) ** 2 + (y - center) ** 2 <= (size * 0.105) ** 2;
-      if (iris) {
-        r = 23;
-        g = 32;
-        b = 38;
+      const promptLine1 = y > card.y + card.h * 0.22 && y < card.y + card.h * 0.29 && x > card.x + card.w * 0.13 && x < card.x + card.w * 0.58;
+      const promptLine2 = y > card.y + card.h * 0.38 && y < card.y + card.h * 0.44 && x > card.x + card.w * 0.13 && x < card.x + card.w * 0.78;
+      if (promptLine1) {
+        r = 31;
+        g = 111;
+        b = 120;
+      }
+      if (promptLine2) {
+        r = 184;
+        g = 196;
+        b = 203;
       }
 
-      const pupil = (x - center) ** 2 + (y - center) ** 2 <= (size * 0.044) ** 2;
-      if (pupil) {
+      if (inRotatedRect(x, y, stamp)) {
+        r = 139;
+        g = 37;
+        b = 37;
+        const local = rotatedCoords(x, y, stamp);
+        const borderX = Math.abs(local.x) > stamp.w * 0.43;
+        const borderY = Math.abs(local.y) > stamp.h * 0.32;
+        const textStripe = Math.abs(local.y) < stamp.h * 0.11 && Math.abs(local.x) < stamp.w * 0.36;
+        const textBreak = Math.sin((local.x / stamp.w) * Math.PI * 12) > 0.38;
+        if (borderX || borderY || (textStripe && textBreak)) {
+          r = 255;
+          g = 243;
+          b = 232;
+        }
+      }
+
+      const cursorH = x > size * 0.76 && x < size * 0.91 && y > size * 0.78 && y < size * 0.84;
+      const cursorV = x > size * 0.88 && x < size * 0.94 && y > size * 0.7 && y < size * 0.91;
+      if (cursorH || cursorV) {
         r = 159;
         g = 208;
         b = 202;
       }
 
-      const topBar = Math.abs(y - size * 0.28) < size * 0.025 && Math.abs(x - center) < size * 0.14;
-      const stem = Math.abs(x - center) < size * 0.024 && y > size * 0.21 && y < size * 0.36;
-      if (topBar || stem) {
-        r = 247;
-        g = 243;
-        b = 223;
+      const spark = (x - size * 0.2) ** 2 + (y - size * 0.22) ** 2 <= (size * 0.03) ** 2;
+      if (spark) {
+        r = 243;
+        g = 155;
+        b = 114;
       }
 
-      const vignette = Math.min(1, Math.hypot(x - center, y - center) / badgeRadius);
+      const vignette = Math.min(1, Math.hypot(x - center, y - center) / (size * 0.62));
       r = Math.round(r * (1 - vignette * 0.1));
       g = Math.round(g * (1 - vignette * 0.1));
       b = Math.round(b * (1 - vignette * 0.1));

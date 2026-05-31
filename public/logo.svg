@@ -1,25 +1,35 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
   <title id="title">Promptly Doomed logo</title>
-  <desc id="desc">A stylized judge eye inside a survival badge.</desc>
+  <desc id="desc">A prompt card stamped doomed with a blinking cursor.</desc>
   <defs>
-    <linearGradient id="badge" x1="80" y1="52" x2="436" y2="456" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#174f58"/>
-      <stop offset="0.56" stop-color="#1f6f78"/>
-      <stop offset="1" stop-color="#8b2525"/>
+    <linearGradient id="tile" x1="66" y1="38" x2="440" y2="470" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#123d45"/>
+      <stop offset="0.5" stop-color="#172026"/>
+      <stop offset="1" stop-color="#3b1822"/>
     </linearGradient>
-    <linearGradient id="eye" x1="142" y1="198" x2="374" y2="318" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#f7f3df"/>
-      <stop offset="1" stop-color="#ffffff"/>
+    <linearGradient id="card" x1="128" y1="92" x2="358" y2="398" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fffaf0"/>
+      <stop offset="1" stop-color="#e7edf0"/>
     </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#080d10" flood-opacity=".32"/>
+    </filter>
   </defs>
-  <rect width="512" height="512" rx="112" fill="#172026"/>
-  <path d="M256 54 418 116v124c0 104-64 178-162 218C158 418 94 344 94 240V116L256 54Z" fill="url(#badge)"/>
-  <path d="M256 98 382 146v94c0 78-46 136-126 172-80-36-126-94-126-172v-94l126-48Z" fill="none" stroke="#f7f3df" stroke-width="18" stroke-linejoin="round" opacity=".9"/>
-  <path d="M136 260c32-50 72-75 120-75s88 25 120 75c-32 50-72 75-120 75s-88-25-120-75Z" fill="url(#eye)"/>
-  <circle cx="256" cy="260" r="54" fill="#172026"/>
-  <circle cx="256" cy="260" r="24" fill="#9fd0ca"/>
-  <path d="M196 159h120" stroke="#f7f3df" stroke-width="24" stroke-linecap="round"/>
-  <path d="M256 133v52" stroke="#f7f3df" stroke-width="24" stroke-linecap="round"/>
-  <path d="M198 382h116" stroke="#f7f3df" stroke-width="24" stroke-linecap="round"/>
-  <path d="M256 335v47" stroke="#f7f3df" stroke-width="24" stroke-linecap="round"/>
+  <rect width="512" height="512" rx="112" fill="url(#tile)"/>
+  <path d="M92 98h328a32 32 0 0 1 32 32v246a32 32 0 0 1-32 32H92a32 32 0 0 1-32-32V130a32 32 0 0 1 32-32Z" fill="#0e171c" opacity=".35"/>
+  <g filter="url(#shadow)">
+    <path d="M102 78h284l64 64v236a32 32 0 0 1-32 32H102a32 32 0 0 1-32-32V110a32 32 0 0 1 32-32Z" fill="url(#card)"/>
+    <path d="M386 78v48a16 16 0 0 0 16 16h48L386 78Z" fill="#cfd9df"/>
+    <path d="M120 158h172" stroke="#1f6f78" stroke-width="24" stroke-linecap="round"/>
+    <path d="M120 214h246" stroke="#b8c4cb" stroke-width="22" stroke-linecap="round"/>
+    <path d="M120 266h120" stroke="#b8c4cb" stroke-width="22" stroke-linecap="round"/>
+  </g>
+  <g transform="rotate(-12 277 294)">
+    <rect x="132" y="244" width="290" height="100" rx="18" fill="#8b2525"/>
+    <rect x="144" y="256" width="266" height="76" rx="12" fill="none" stroke="#f7d7d0" stroke-width="8"/>
+    <text x="277" y="311" fill="#fff3e8" font-family="Impact, Arial Black, sans-serif" font-size="52" font-weight="900" letter-spacing="3" text-anchor="middle">DOOMED</text>
+  </g>
+  <path d="M328 364h68" stroke="#9fd0ca" stroke-width="22" stroke-linecap="round"/>
+  <path d="M396 332v64" stroke="#9fd0ca" stroke-width="22" stroke-linecap="round"/>
+  <circle cx="106" cy="112" r="12" fill="#f39b72"/>
 </svg>
