@@ -112,7 +112,7 @@ export const defaultAiSettings: AiSettings = {
       ? "none"
       : "json_object",
   httpReferer: window.location.origin,
-  appTitle: "Judged by AI",
+  appTitle: "Promptly Doomed",
 };
 
 export function loadAiSettings(): AiSettings {
@@ -212,7 +212,7 @@ export async function completeOpenRouterOAuthFromUrl(): Promise<string | null> {
           : "openai/gpt-4.1-mini",
       responseFormat: "json_object",
       httpReferer: window.location.origin,
-      appTitle: "Judged by AI",
+      appTitle: "Promptly Doomed",
     });
     const message = "OpenRouter connected. You can now choose a model and test the endpoint.";
     localStorage.setItem(openRouterOAuthNoticeKey, message);

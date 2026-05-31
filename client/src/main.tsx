@@ -234,7 +234,7 @@ function BrandTitle({ subtitle }: { subtitle?: string }) {
     <div className="brand">
       <img className="brand-logo" src={assetPath("logo.svg")} alt="" />
       <div>
-        <h1>Judged by AI</h1>
+        <h1>Promptly Doomed</h1>
         {subtitle && <p>{subtitle}</p>}
       </div>
     </div>

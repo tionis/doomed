@@ -1,4 +1,4 @@
-const cacheName = "judged-by-ai-v1";
+const cacheName = "promptly-doomed-v1";
 const scopeUrl = self.registration.scope;
 const assetUrl = (path) => new URL(path, scopeUrl).toString();
 const coreAssets = [

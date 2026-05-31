@@ -1,4 +1,4 @@
-# Judged by AI
+# Promptly Doomed
 
 Bad plans die fast. Good plans get judged anyway.
 
@@ -43,7 +43,7 @@ bun install
 Create an Instant app:
 
 ```bash
-npx instant-cli init-without-files --title judged-by-ai
+npx instant-cli init-without-files --title promptly-doomed
 ```
 
 Put the app id in `.env`:
