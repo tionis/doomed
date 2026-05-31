@@ -209,16 +209,16 @@ function GameApp({
           onDemo={onDemo}
         />
       ) : (
-        <RoomView
-          room={room}
-          players={players}
+          <RoomView
+            room={room}
+            players={players}
           allPlayers={rawPlayers}
           submissions={submissions}
           judgments={judgments}
-          me={me}
-          isHost={isHost}
-          authUser={auth.user}
-          onError={setError}
+            me={me}
+            isHost={isHost}
+            authUser={auth.user}
+            onError={setError}
           readOnly={false}
           playersLoaded={!dataQuery.isLoading}
           narratorEnabled={narratorEnabled}
@@ -388,6 +388,10 @@ function Home({
             <h2>Create room</h2>
             <AiSettingsLauncher compact />
           </div>
+          <p className="setup-note">
+            The host browser runs the judge. Set AI settings before the first
+            judgment, or use the mock judge for a dry run.
+          </p>
           <label>
             Host name
             <input value={hostName} onChange={(event) => setHostName(event.target.value)} />
@@ -444,9 +448,61 @@ function Home({
           <button onClick={joinRoom}>Join</button>
         </div>
       </section>
+      <FirstTimeGuide />
       <HostDashboard authUser={authUser} onRoom={onRoom} onError={onError} />
       {demosEnabled && <DemoLauncher onDemo={onDemo} />}
     </>
+  );
+}
+
+function FirstTimeGuide() {
+  return (
+    <section className="panel first-run-guide">
+      <div className="section-heading">
+        <div>
+          <span className="eyebrow">First round survival kit</span>
+          <h2>How the game works</h2>
+        </div>
+        <span>5 steps</span>
+      </div>
+      <div className="help-grid">
+        <article className="help-card">
+          <strong>1. Host sets the judge</strong>
+          <p>
+            Open AI settings, connect OpenRouter or enter any OpenAI-compatible
+            endpoint, choose a model, then run Test endpoint.
+          </p>
+        </article>
+        <article className="help-card">
+          <strong>2. Guests join by code</strong>
+          <p>
+            Only the host needs to sign in. Players can join anonymously from
+            their own browser with the room code.
+          </p>
+        </article>
+        <article className="help-card">
+          <strong>3. Survive the prompt</strong>
+          <p>
+            Each round gives one short disaster prompt. Write a specific plan
+            before the timer ends.
+          </p>
+        </article>
+        <article className="help-card">
+          <strong>4. Avoid lazy words</strong>
+          <p>
+            Words like “survive” and “escape” are banned, so players must explain
+            what they actually do.
+          </p>
+        </article>
+        <article className="help-card">
+          <strong>5. The judge reveals fate</strong>
+          <p>
+            The active player advances reveals. The AI scores logic, creativity,
+            feasibility, and humor.
+          </p>
+        </article>
+      </div>
+    </section>
   );
 }
 
@@ -1278,7 +1334,14 @@ function RoomView({
       </aside>
       <section className="stage">
         {room.status === "lobby" ? (
-          <Lobby room={room} me={me} players={players} isHost={isHost} readOnly={readOnly} />
+          <Lobby
+            room={room}
+            me={me}
+            players={players}
+            isHost={isHost}
+            readOnly={readOnly}
+            onError={onError}
+          />
         ) : room.status === "finished" ? (
           <GameSummary
             room={room}
@@ -1351,37 +1414,49 @@ function Lobby({
   players,
   isHost,
   readOnly,
+  onError,
 }: {
   room: Room;
   me?: Player;
   players: Player[];
   isHost: boolean;
   readOnly: boolean;
+  onError: (error: string) => void;
 }) {
+  const [checkingAi, setCheckingAi] = useState(false);
+
   async function toggleReady() {
     if (!me || readOnly) return;
     await db!.transact(tx.players[me.id].update({ ready: !me.ready }));
   }
 
   async function startGame() {
-    if (readOnly) return;
+    if (readOnly || checkingAi) return;
+    setCheckingAi(true);
     const scenario = pickScenario(1);
     const activePlayer = players[0];
-    await db!.transact(
-      tx.rooms[room.id].update({
-        status: "round_intro",
-        roundIndex: 1,
-        revealIndex: 0,
-        activePlayerId: activePlayer?.id,
-        scenarioTitle: scenario.title,
-        scenarioText: scenario.scenarioText,
-        immediateThreat: scenario.immediateThreat,
-        timePressure: scenario.timePressure,
-        category: scenario.category,
-        bannedWords: bannedWordsForRound(1),
-        updatedAt: Date.now(),
-      }),
-    );
+    try {
+      await testAiEndpoint(loadAiSettings());
+      await db!.transact(
+        tx.rooms[room.id].update({
+          status: "round_intro",
+          roundIndex: 1,
+          revealIndex: 0,
+          activePlayerId: activePlayer?.id,
+          scenarioTitle: scenario.title,
+          scenarioText: scenario.scenarioText,
+          immediateThreat: scenario.immediateThreat,
+          timePressure: scenario.timePressure,
+          category: scenario.category,
+          bannedWords: bannedWordsForRound(1),
+          updatedAt: Date.now(),
+        }),
+      );
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "AI endpoint test failed.");
+    } finally {
+      setCheckingAi(false);
+    }
   }
 
   return (
@@ -1391,13 +1466,23 @@ function Lobby({
         {players.length} player{players.length === 1 ? "" : "s"} joined. The host
         starts the game, then round control rotates between players.
       </p>
+      {isHost && (
+        <p className="setup-note">
+          Start game runs a quick AI endpoint test first. If it fails, open AI
+          settings and test the judge before trying again.
+        </p>
+      )}
       <div className="actions">
         {!isHost && (
           <button className={me?.ready ? "secondary" : ""} onClick={toggleReady}>
             {me?.ready ? "Not ready" : "Ready"}
           </button>
         )}
-        {isHost && <button onClick={startGame}>Start game</button>}
+        {isHost && (
+          <button disabled={checkingAi} onClick={startGame}>
+            {checkingAi ? "Checking AI..." : "Start game"}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -2507,6 +2592,18 @@ function AiSettingsModal({ onClose }: { onClose: () => void }) {
               {preset.needsToken && <small>Token required</small>}
             </button>
           ))}
+        </div>
+
+        <div className="ai-checklist">
+          <h3>Fastest setup</h3>
+          <ol>
+            <li>Pick OpenRouter and click Connect OpenRouter, or choose a local endpoint preset.</li>
+            <li>Load models and pick one, or type the model id directly.</li>
+            <li>Run Test endpoint before starting judging.</li>
+          </ol>
+          <p>
+            Tokens stay in this browser. Guests never see or need the host's AI key.
+          </p>
         </div>
 
         <div className="ai-form">

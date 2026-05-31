@@ -204,6 +204,45 @@ h3 {
   margin-top: 18px;
 }
 
+.first-run-guide {
+  margin-top: 18px;
+}
+
+.setup-note {
+  border-radius: 6px;
+  background: #f4f6f8;
+  color: #46545f;
+  padding: 0.7rem 0.8rem;
+  font-weight: 700;
+}
+
+.help-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.help-card {
+  display: grid;
+  gap: 0.35rem;
+  align-content: start;
+  min-height: 160px;
+  border-radius: 8px;
+  border: 1px solid #d9e0e6;
+  background: #f8fafb;
+  padding: 14px;
+}
+
+.help-card strong {
+  color: #172026;
+}
+
+.help-card p {
+  margin-bottom: 0;
+  color: #60707c;
+  font-size: 0.94rem;
+}
+
 .section-heading {
   display: flex;
   justify-content: space-between;
@@ -948,6 +987,33 @@ code {
   color: #8b2525;
 }
 
+.ai-checklist {
+  border-radius: 8px;
+  border: 1px solid #d9e0e6;
+  background: #f8fafb;
+  padding: 14px 16px;
+}
+
+.ai-checklist h3 {
+  margin-bottom: 0.35rem;
+}
+
+.ai-checklist ol {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.ai-checklist li {
+  margin: 0.25rem 0;
+  color: #46545f;
+  font-weight: 700;
+}
+
+.ai-checklist p {
+  margin: 0.7rem 0 0;
+  color: #60707c;
+}
+
 .ai-form {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1036,6 +1102,7 @@ code {
   .history-item,
   .scenario dl,
   .settings,
+  .help-grid,
   .provider-grid,
   .ai-form {
     grid-template-columns: 1fr;
