@@ -1,65 +1,54 @@
-name: CI
+---
+name: CI and deploy
 
 on:
   push:
-    branches: ["main"]
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: github-pages
+  group: static-site-production
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Typecheck and build
+  build-and-deploy:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.2.0"
-
-      - name: Install dependencies
-        run: bun install
-
-      - name: Typecheck
-        run: bun run lint
-
-      - name: Configure GitHub Pages
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/configure-pages@v5
-
-      - name: Build
-        run: bun run build
+      - name: Install and typecheck
+        run: |
+          bun install
+          bun run lint
+      - name: Build website
         env:
           VITE_INSTANT_APP_ID: ${{ secrets.VITE_INSTANT_APP_ID }}
-          VITE_BASE_PATH: ${{ vars.VITE_BASE_PATH || format('/{0}/', github.event.repository.name) }}
-
-      - name: Upload GitHub Pages artifact
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist/client
-
-  deploy:
-    name: Deploy to GitHub Pages
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
-    steps:
-      - name: Deploy
-        id: deployment
-        uses: actions/deploy-pages@v4
+          VITE_BASE_PATH: /
+        run: bun run build
+      - name: Validate production configuration
+        if: github.event_name != 'pull_request'
+        env:
+          VITE_INSTANT_APP_ID: ${{ secrets.VITE_INSTANT_APP_ID }}
+        run: test -n "$VITE_INSTANT_APP_ID"
+      - name: Deploy to Bunny
+        if: github.event_name != 'pull_request'
+        env:
+          BUNNY_STORAGE_ZONE: doomed-tionis-dev
+          BUNNY_STORAGE_ENDPOINT: storage.bunnycdn.com
+          BUNNY_STORAGE_PASSWORD: ${{ secrets.BUNNY_STORAGE_PASSWORD }}
+          BUNNY_PURGE_ENDPOINT: https://tionis-static-site-purge.bunny.run
+        run: |
+          curl -fsSL \
+            https://forge.tionis.dev/actions/static-site-deploy/raw/commit/86964aa187a7cc6519ed9bf45f1e9f0999fd7bf8/static_site.py \
+            -o /tmp/static-site.py
+          echo '5f9a3e8ca730803ab5d83a58b2d972ae97ba5424fa113a0ff011775b2638ec2e  /tmp/static-site.py' |
+            sha256sum --check
+          python3 /tmp/static-site.py bunny dist/client
