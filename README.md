@@ -118,15 +118,26 @@ testing the game flow.
 
 ## Deployment
 
-Build static client files:
+Single-container Docker image (client bundle served same-origin by the
+backend, so no `VITE_BACKEND_URL` needed):
+
+```bash
+docker build -t doomed .
+docker run -p 3001:3001 --env-file .env -v doomed-data:/app/data doomed
+```
+
+Or with compose:
+
+```bash
+docker compose up --build
+```
+
+For split hosting, build static client files with `VITE_BACKEND_URL` set at
+build time and deploy `dist/client` anywhere:
 
 ```bash
 bun run build
 ```
-
-Deploy `dist/client` to any static host with `VITE_BACKEND_URL` set at build
-time, and run the backend (`bun server/src/index.ts`) where the client can
-reach it.
 
 ### GitHub Pages
 
@@ -153,11 +164,14 @@ bun run icons
 
 - `server/src/index.ts` Bun entrypoint (REST + WebSocket sync).
 - `server/src/app.ts` Hono routes (`/api/rooms`, `/api/host`, `/api/admin`,
-  `/scim/v2`, `/sync/:code`).
+  `/api/auth/oidc`, `/scim/v2`, `/sync/:code`), CORS, rate limits, static
+  client serving.
 - `server/src/store.ts` Automerge room docs with JSON snapshot persistence.
 - `server/src/llm.ts` server-side AI judging with mock fallback.
-- `server/src/auth.ts` OIDC host token verification.
-- `server/src/scim.ts` minimal SCIM 2.0 user provisioning.
+- `server/src/auth.ts` + `server/src/oidc.ts` OIDC host token verification
+  and PKCE callback.
+- `server/src/scim.ts` + `server/src/scimStore.ts` SCIM 2.0 provisioning
+  with admin entitlement wiring.
 - `client/src/main.tsx` realtime game UI and host controls.
-- `client/src/serverSync.ts` backend REST + WebSocket snapshot hooks.
+- `client/src/serverSync.ts` backend REST + Automerge delta-sync hooks.
 - `client/src/serverAuth.ts` OIDC login and host token storage.

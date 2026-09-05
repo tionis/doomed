@@ -14,7 +14,12 @@ export function setHostToken(token: string) {
 }
 
 export function backendBase() {
-  return (import.meta.env.VITE_BACKEND_URL as string | undefined ?? "http://localhost:3001").replace(/\/$/, "");
+  const configured = (import.meta.env.VITE_BACKEND_URL as string | undefined ?? "").replace(/\/$/, "");
+  if (configured) return configured;
+  // Dev default (Vite :3000, backend :3001); production builds served
+  // same-origin fall back to whoever served the page.
+  if (import.meta.env.DEV) return "http://localhost:3001";
+  return window.location.origin.replace(/\/$/, "");
 }
 
 export function oidcConfigured() {

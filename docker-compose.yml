@@ -1,0 +1,19 @@
+services:
+  doomed:
+    build:
+      context: .
+      args:
+        VITE_OIDC_ISSUER: ${VITE_OIDC_ISSUER:-}
+        VITE_OIDC_CLIENT_ID: ${VITE_OIDC_CLIENT_ID:-}
+    ports:
+      - "${PORT:-3001}:3001"
+    env_file:
+      - .env
+    environment:
+      PORT: "3001"
+    volumes:
+      - doomed-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  doomed-data:

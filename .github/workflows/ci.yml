@@ -28,7 +28,7 @@ jobs:
         run: |
           bun install
           bun run lint
-          cd server && bun install && bun run lint
+          cd server && bun install && bun run lint && bun test
       - name: Build website
         env:
           VITE_BACKEND_URL: ${{ secrets.VITE_BACKEND_URL }}

@@ -6,7 +6,10 @@ export type ScimUser = {
   entitlements?: string[];
 };
 
-const PATH = new URL("../../data/scim-users.json", import.meta.url);
+const PATH = new URL(
+  process.env.SCIM_DATA_PATH ?? "../../data/scim-users.json",
+  import.meta.url,
+);
 
 let cache: Map<string, ScimUser> | null = null;
 
