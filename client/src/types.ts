@@ -84,21 +84,3 @@ export type Judgment = {
   rawModelOutput?: string;
   createdAt: number;
 };
-
-export type AdminIdentity = {
-  id: string;
-  email: string;
-  note?: string;
-  createdAt: number;
-  createdBy?: string;
-};
-
-export type AiSettings = {
-  provider: string;
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-  responseFormat: "json_object" | "none";
-  httpReferer: string;
-  appTitle: string;
-};

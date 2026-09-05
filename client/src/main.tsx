@@ -1,36 +1,44 @@
 import { createRoot } from "react-dom/client";
-import { id, lookup, tx } from "@instantdb/react";
-import type { AuthState, User } from "@instantdb/react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { db, instantAppId } from "./instant";
-import {
-  bannedWordsForRound,
-  findBlockedSubmissionPhrases,
-  generateCode,
-  mockJudgment,
-  panicSubmission,
-  pickScenario,
-} from "./game";
-import {
-  aiProviderPresets,
-  completeOpenRouterOAuthFromUrl,
-  consumeOpenRouterOAuthNotice,
-  defaultAiSettings,
-  judgeSubmission,
-  listAiModels,
-  loadAiSettings,
-  openRouterOAuthDebug,
-  saveAiSettings,
-  startOpenRouterOAuth,
-  testAiEndpoint,
-} from "./ai";
+import { findBlockedSubmissionPhrases, pickScenario } from "./game";
 import { createDemoState, type DemoMode } from "./demo";
-import type { AdminIdentity, AiSettings, Judgment, Player, Room, Submission } from "./types";
-import type { AiModel } from "./ai";
+import type { Judgment, Player, Room, Submission } from "./types";
+import {
+  decodeHostToken,
+  startOidcLogin,
+  useHostIdentity,
+  type HostIdentity,
+} from "./serverAuth";
+import {
+  addAdminIdentity,
+  adminCleanup,
+  adminDeleteRoom,
+  adminUpdateRoom,
+  advanceReveal,
+  closeSubmissions,
+  controlRoom,
+  createRoom as createRoomOnServer,
+  fetchAdminRooms,
+  fetchAdmins,
+  fetchHostRooms,
+  fetchSnapshot,
+  heartbeat,
+  hideFromHistory as hideFromHistoryOnServer,
+  joinRoom as joinRoomOnServer,
+  nextRound,
+  removeAdminIdentity,
+  requestJudge,
+  setReady,
+  startGame as startGameOnServer,
+  submitText,
+  useRoomSnapshot,
+  getLocalClientId,
+  type AdminIdentity,
+  type AdminRoomRow,
+} from "./serverSync";
 import "./styles.css";
 
-const localClientId = getLocal("jba.clientId", () => crypto.randomUUID());
-const oldUnlinkedRoomMs = 7 * 24 * 60 * 60 * 1000;
+const localClientId = getLocalClientId();
 function App() {
   const params = new URLSearchParams(window.location.search);
   const demosEnabled = params.get("demo") === "1";
@@ -38,9 +46,6 @@ function App() {
   const [demoMode, setDemoMode] = useState<DemoMode | null>(null);
   if (demoMode) {
     return <DemoView mode={demoMode} onExit={() => setDemoMode(null)} />;
-  }
-  if (!instantAppId || !db) {
-    return <SetupScreen demosEnabled={demosEnabled} onDemo={setDemoMode} />;
   }
   return <GameApp demosEnabled={demosEnabled} adminEnabled={adminEnabled} onDemo={setDemoMode} />;
 }
@@ -54,39 +59,28 @@ function GameApp({
   adminEnabled: boolean;
   onDemo: (mode: DemoMode) => void;
 }) {
-  const auth = db!.useAuth();
-  const adminIdentityQuery = db!.useQuery(
-    auth.user?.email
-      ? {
-          admins: {
-            $: { where: { email: auth.user.email } },
-          },
-        }
-      : null,
-  );
+  const { identity } = useHostIdentity();
   const [activeCode, setActiveCode] = useState(getInitialRoomCode());
-  const roomQuery = db!.useQuery({
-    rooms: { $: { where: { code: activeCode || "__none__" } } },
-  });
-  const room = (roomQuery.data?.rooms?.[0] as Room | undefined) ?? null;
-  const roomId = room?.id ?? "__none__";
-  const dataQuery = db!.useQuery({
-    players: { $: { where: { roomId }, order: { seatIndex: "asc" } } },
-    submissions: { $: { where: { roomId } } },
-    judgments: { $: { where: { roomId } } },
-  });
+  const { snapshot, connected, notFound } = useRoomSnapshot(activeCode || null);
 
-  const rawPlayers = (dataQuery.data?.players ?? []) as Player[];
-  const submissions = (dataQuery.data?.submissions ?? []) as Submission[];
-  const judgments = (dataQuery.data?.judgments ?? []) as Judgment[];
-  const players = dedupePlayersByClient(
-    rawPlayers,
-    submissions,
-    judgments,
-    room?.status === "finished" ? undefined : room?.roundIndex,
-  ).sort((a, b) => a.seatIndex - b.seatIndex);
+  const room = snapshot?.room ?? null;
+  const players = useMemo(
+    () => Object.values(snapshot?.players ?? {}).sort((a, b) => a.seatIndex - b.seatIndex),
+    [snapshot],
+  );
+  const submissions = useMemo(() => Object.values(snapshot?.submissions ?? {}), [snapshot]);
+  const judgments = useMemo(() => Object.values(snapshot?.judgments ?? {}), [snapshot]);
   const me = players.find((player) => player.clientId === localClientId);
-  const isHost = Boolean(room && room.hostClientId === localClientId);
+  const isHost = Boolean(me?.isHost || (room && room.hostClientId === localClientId));
+
+  const [joining, setJoining] = useState(false);
+  useEffect(() => {
+    if (!room || me || joining) return;
+    setJoining(true);
+    joinRoomOnServer(room.code, localStorage.getItem("jba.name") ?? (isHost ? room.hostName : "Guest"))
+      .catch(() => undefined)
+      .finally(() => setJoining(false));
+  }, [room?.code, me?.id, joining]);
 
   useEffect(() => {
     if (activeCode) localStorage.setItem("jba.roomCode", activeCode);
@@ -94,21 +88,28 @@ function GameApp({
   }, [activeCode]);
 
   useEffect(() => {
-    if (!me) return;
-    const heartbeat = setInterval(() => {
-      void db!.transact(
-        tx.players[me.id].update({ connected: true, lastSeenAt: Date.now() }),
-      );
+    if (!me || !activeCode) return;
+    const timer = setInterval(() => {
+      void heartbeat(activeCode, me.id).catch(() => undefined);
     }, 15_000);
-    return () => clearInterval(heartbeat);
-  }, [me?.id]);
+    return () => clearInterval(timer);
+  }, [me?.id, activeCode]);
 
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [narratorEnabled, setNarratorEnabled] = useState(
     localStorage.getItem("jba.narrator") === "1",
   );
-  const isAdmin = Boolean((adminIdentityQuery.data?.admins ?? []).length);
+  const [isAdmin, setIsAdmin] = useState(false);
+  useEffect(() => {
+    if (!decodeHostToken()) {
+      setIsAdmin(false);
+      return;
+    }
+    fetchAdmins()
+      .then(() => setIsAdmin(true))
+      .catch(() => setIsAdmin(false));
+  }, [identity?.sub]);
   const openRoom = (code: string) => {
     setActiveCode(code);
     const url = new URL(window.location.href);
@@ -120,18 +121,6 @@ function GameApp({
   useEffect(() => {
     localStorage.setItem("jba.narrator", narratorEnabled ? "1" : "0");
   }, [narratorEnabled]);
-
-  useEffect(() => {
-    const storedNotice = consumeOpenRouterOAuthNotice();
-    if (storedNotice) setNotice(storedNotice);
-    void completeOpenRouterOAuthFromUrl()
-      .then((message) => {
-        if (message) setNotice(message);
-      })
-      .catch((error) => {
-        setError(error instanceof Error ? error.message : "OpenRouter OAuth failed");
-      });
-  }, []);
 
   return (
     <main>
@@ -168,7 +157,7 @@ function GameApp({
             Home
           </button>
         )}
-        <AuthWidget auth={auth} onError={setError} />
+        <AuthWidget onError={setError} />
       </header>
 
       {error && (
@@ -184,7 +173,6 @@ function GameApp({
 
       {adminEnabled ? (
         <AdminGate
-          auth={auth}
           onRoom={(code) => {
             const url = new URL(window.location.href);
             url.searchParams.set("room", code);
@@ -201,26 +189,37 @@ function GameApp({
           }}
         />
       ) : !room ? (
+        notFound && activeCode ? (
+          <section className="panel auth">
+            <BrandTitle />
+            <h2>Room {activeCode} not found</h2>
+            <p className="muted">Check the code or create a new room.</p>
+            <button className="secondary" onClick={() => openRoom("")}>
+              Back home
+            </button>
+          </section>
+        ) : (
         <Home
-          authUser={auth.user}
+          identity={identity}
           onRoom={openRoom}
           onError={setError}
           demosEnabled={demosEnabled}
           onDemo={onDemo}
         />
+        )
       ) : (
           <RoomView
             room={room}
             players={players}
-          allPlayers={rawPlayers}
+          allPlayers={players}
           submissions={submissions}
           judgments={judgments}
             me={me}
             isHost={isHost}
-            authUser={auth.user}
             onError={setError}
           readOnly={false}
-          playersLoaded={!dataQuery.isLoading}
+          playersLoaded={Boolean(snapshot)}
+          connected={connected}
           narratorEnabled={narratorEnabled}
           onNarratorChange={setNarratorEnabled}
         />
@@ -241,40 +240,12 @@ function BrandTitle({ subtitle }: { subtitle?: string }) {
   );
 }
 
-function SetupScreen({
-  demosEnabled,
-  onDemo,
-}: {
-  demosEnabled: boolean;
-  onDemo: (mode: DemoMode) => void;
-}) {
-  return (
-    <main>
-      <section className="panel auth">
-        <BrandTitle />
-        <h2>InstantDB app required</h2>
-        <p className="muted">
-          Set <code>VITE_INSTANT_APP_ID</code> in <code>.env</code>, then restart
-          the dev server. The game is a static app and uses InstantDB for room
-          sync.
-        </p>
-        {!demosEnabled && (
-          <p className="muted">
-            Demo screens are available at <code>?demo=1</code>.
-          </p>
-        )}
-      </section>
-      {demosEnabled && <DemoLauncher onDemo={onDemo} />}
-    </main>
-  );
-}
-
 function DemoView({ mode, onExit }: { mode: DemoMode; onExit: () => void }) {
   const demo = useMemo(() => createDemoState(mode), [mode]);
   return (
     <main>
       <header className="topbar">
-        <BrandTitle subtitle="Demo mode for status updates. No InstantDB writes, no AI calls." />
+        <BrandTitle subtitle="Demo mode for status updates. No backend writes, no AI calls." />
         <button className="secondary" onClick={onExit}>
           Exit demo
         </button>
@@ -291,10 +262,10 @@ function DemoView({ mode, onExit }: { mode: DemoMode; onExit: () => void }) {
         judgments={demo.judgments}
         me={demo.me}
         isHost={false}
-        authUser={null}
         onError={() => undefined}
         readOnly
         playersLoaded
+        connected={false}
         narratorEnabled={false}
         onNarratorChange={() => undefined}
       />
@@ -303,13 +274,13 @@ function DemoView({ mode, onExit }: { mode: DemoMode; onExit: () => void }) {
 }
 
 function Home({
-  authUser,
+  identity,
   onRoom,
   onError,
   demosEnabled,
   onDemo,
 }: {
-  authUser?: User | null;
+  identity: HostIdentity | null;
   onRoom: (code: string) => void;
   onError: (error: string) => void;
   demosEnabled: boolean;
@@ -321,60 +292,30 @@ function Home({
   const [roundCount, setRoundCount] = useState(5);
   const [submissionSeconds, setSubmissionSeconds] = useState(60);
   const [difficulty, setDifficulty] = useState<Room["difficulty"]>("normal");
+  const [busy, setBusy] = useState(false);
 
   async function createRoom() {
+    if (busy) return;
+    setBusy(true);
     try {
-      const roomId = id();
-      const playerId = id();
-      const roomCode = generateCode();
-      const now = Date.now();
       localStorage.setItem("jba.name", hostName);
-      await db!.transact([
-        tx.rooms[roomId].update({
-          code: roomCode,
-          hostClientId: localClientId,
-          ...(authUser
-            ? {
-                hostUserId: authUser.id,
-                ...(authUser.email ? { hostEmail: authUser.email } : {}),
-                hiddenFromHostHistory: false,
-              }
-            : {}),
-          hostName,
-          status: "lobby",
-          roundIndex: 0,
-          roundCount,
-          submissionSeconds,
-          difficulty,
-          revealIndex: 0,
-          createdAt: now,
-          updatedAt: now,
-        }),
-        tx.players[playerId].update({
-          roomId,
-          clientId: localClientId,
-          name: hostName,
-          seatIndex: 0,
-          isHost: true,
-          connected: true,
-          ready: true,
-          score: 0,
-          survivalCount: 0,
-          deathCount: 0,
-          joinedAt: now,
-          lastSeenAt: now,
-        }),
-      ]);
-      onRoom(roomCode);
+      const { room } = await createRoomOnServer({ hostName, roundCount, submissionSeconds, difficulty });
+      await joinRoomOnServer(room.code, hostName).catch(() => undefined);
+      onRoom(room.code);
     } catch (error) {
       onError(error instanceof Error ? error.message : "Could not create room");
+    } finally {
+      setBusy(false);
     }
   }
 
   async function joinRoom() {
     try {
       localStorage.setItem("jba.name", guestName);
-      onRoom(code.toUpperCase());
+      const target = code.toUpperCase();
+      await fetchSnapshot(target);
+      await joinRoomOnServer(target, guestName).catch(() => undefined);
+      onRoom(target);
     } catch (error) {
       onError(error instanceof Error ? error.message : "Could not join room");
     }
@@ -386,11 +327,10 @@ function Home({
         <div className="panel">
           <div className="section-heading">
             <h2>Create room</h2>
-            <AiSettingsLauncher compact />
           </div>
           <p className="setup-note">
-            The host browser runs the judge. Set AI settings before the first
-            judgment, or use the mock judge for a dry run.
+            The backend runs the judge with a server-side key. Guests join with
+            the room code, no login needed.
           </p>
           <label>
             Host name
@@ -429,7 +369,7 @@ function Home({
               </select>
             </label>
           </div>
-          <button onClick={createRoom}>Create</button>
+          <button disabled={busy} onClick={createRoom}>Create</button>
         </div>
         <div className="panel">
           <h2>Join as guest</h2>
@@ -449,7 +389,7 @@ function Home({
         </div>
       </section>
       <FirstTimeGuide />
-      <HostDashboard authUser={authUser} onRoom={onRoom} onError={onError} />
+      <HostDashboard identity={identity} onRoom={onRoom} onError={onError} />
       {demosEnabled && <DemoLauncher onDemo={onDemo} />}
     </>
   );
@@ -467,10 +407,10 @@ function FirstTimeGuide() {
       </div>
       <div className="help-grid">
         <article className="help-card">
-          <strong>1. Host sets the judge</strong>
+          <strong>1. Host creates the room</strong>
           <p>
-            Open AI settings, connect OpenRouter or enter any OpenAI-compatible
-            endpoint, choose a model, then run Test endpoint.
+            Sign in with your organization account to host. The backend runs
+            the AI judge with a server-side key.
           </p>
         </article>
         <article className="help-card">
@@ -506,56 +446,32 @@ function FirstTimeGuide() {
   );
 }
 
-function AuthWidget({
-  auth,
-  onError,
-}: {
-  auth: AuthState;
-  onError: (error: string) => void;
-}) {
-  const [email, setEmail] = useState("");
-  const [code, setCode] = useState("");
-  const [sent, setSent] = useState(false);
+function AuthWidget({ onError }: { onError: (error: string) => void }) {
+  const { identity, refresh, signOut } = useHostIdentity();
   const [confirmSignOut, setConfirmSignOut] = useState(false);
+  const [loggingIn, setLoggingIn] = useState(false);
 
-  async function sendCode() {
+  async function login() {
+    setLoggingIn(true);
     try {
-      await db!.auth.sendMagicCode({ email });
-      setSent(true);
+      await startOidcLogin();
     } catch (error) {
-      onError(error instanceof Error ? error.message : "Could not send login code");
+      setLoggingIn(false);
+      onError(error instanceof Error ? error.message : "Could not start login");
     }
   }
 
-  async function verifyCode() {
-    try {
-      await db!.auth.signInWithMagicCode({ email, code });
-      setCode("");
-      setSent(false);
-    } catch (error) {
-      onError(error instanceof Error ? error.message : "Could not verify login code");
-    }
-  }
+  useEffect(() => {
+    refresh();
+  }, []);
 
-  async function signOut() {
-    try {
-      await db!.auth.signOut();
-    } catch (error) {
-      onError(error instanceof Error ? error.message : "Could not sign out");
-    }
-  }
-
-  if (auth.isLoading) {
-    return <div className="authbox muted">Checking login...</div>;
-  }
-
-  if (auth.user) {
+  if (identity) {
     return (
       <div className="authbox signed-in">
-        <span>{auth.user.email ?? "Signed in"}</span>
+        <span>{identity.email ?? "Signed in"}</span>
         {confirmSignOut ? (
           <div className="confirm-actions">
-            <button className="secondary danger-action" onClick={signOut}>
+            <button className="secondary danger-action" onClick={() => { signOut(); setConfirmSignOut(false); }}>
               Confirm
             </button>
             <button className="secondary" onClick={() => setConfirmSignOut(false)}>
@@ -573,54 +489,38 @@ function AuthWidget({
 
   return (
     <div className="authbox">
-      <input
-        type="email"
-        value={email}
-        onChange={(event) => setEmail(event.target.value)}
-        placeholder="host@example.com"
-      />
-      {sent && (
-        <input
-          inputMode="numeric"
-          value={code}
-          onChange={(event) => setCode(event.target.value)}
-          placeholder="Code"
-        />
-      )}
-      <button
-        className="secondary"
-        disabled={!email || (sent && !code)}
-        onClick={sent ? verifyCode : sendCode}
-      >
-        {sent ? "Verify" : "Host login"}
+      <button className="secondary" disabled={loggingIn} onClick={login}>
+        {loggingIn ? "Redirecting..." : "Host login"}
       </button>
     </div>
   );
 }
 
 function HostDashboard({
-  authUser,
+  identity,
   onRoom,
   onError,
 }: {
-  authUser?: User | null;
+  identity: HostIdentity | null;
   onRoom: (code: string) => void;
   onError: (error: string) => void;
 }) {
-  const historyQuery = db!.useQuery(
-    authUser
-      ? {
-          rooms: {
-            $: {
-              where: { hostUserId: authUser.id },
-              order: { createdAt: "desc" },
-            },
-          },
-        }
-      : null,
-  );
+  const [rooms, setRooms] = useState<Room[]>([]);
+  const [loading, setLoading] = useState(false);
 
-  if (!authUser) {
+  useEffect(() => {
+    if (!identity) {
+      setRooms([]);
+      return;
+    }
+    setLoading(true);
+    fetchHostRooms()
+      .then(setRooms)
+      .catch((error) => onError(error instanceof Error ? error.message : "Could not load host history"))
+      .finally(() => setLoading(false));
+  }, [identity?.sub]);
+
+  if (!identity) {
     return (
       <section className="panel dashboard">
         <h2>Host history</h2>
@@ -632,20 +532,13 @@ function HostDashboard({
     );
   }
 
-  const rooms = ((historyQuery.data?.rooms ?? []) as Room[]).filter(
-    (room) => !room.hiddenFromHostHistory,
-  );
   const finished = rooms.filter((room) => room.status === "finished");
   const active = rooms.filter((room) => room.status !== "finished");
 
   async function hide(room: Room) {
     try {
-      await db!.transact(
-        tx.rooms[room.id].update({
-          hiddenFromHostHistory: true,
-          updatedAt: Date.now(),
-        }),
-      );
+      await hideFromHistoryOnServer(room.code);
+      setRooms((current) => current.filter((candidate) => candidate.id !== room.id));
     } catch (error) {
       onError(error instanceof Error ? error.message : "Could not remove game");
     }
@@ -658,10 +551,10 @@ function HostDashboard({
           <h2>Host history</h2>
           <p className="muted">Finished games stay shareable by link or code.</p>
         </div>
-        <span>{historyQuery.isLoading ? "Loading..." : `${rooms.length} game${rooms.length === 1 ? "" : "s"}`}</span>
+        <span>{loading ? "Loading..." : `${rooms.length} game${rooms.length === 1 ? "" : "s"}`}</span>
       </div>
       {rooms.length === 0 ? (
-        <p className="muted">No hosted games yet for {authUser.email}.</p>
+        <p className="muted">No hosted games yet{identity.email ? ` for ${identity.email}` : ""}.</p>
       ) : (
         <div className="history-list">
           {[...active, ...finished].map((room) => (
@@ -691,27 +584,36 @@ function HostDashboard({
 }
 
 function AdminGate({
-  auth,
   onRoom,
   onError,
   onExit,
 }: {
-  auth: AuthState;
   onRoom: (code: string) => void;
   onError: (error: string) => void;
   onExit: () => void;
 }) {
-  const adminIdentityQuery = db!.useQuery(
-    auth.user?.email
-      ? {
-          admins: {
-            $: { where: { email: auth.user.email } },
-          },
-        }
-      : null,
-  );
+  const { identity } = useHostIdentity();
+  const [checking, setChecking] = useState(true);
+  const [allowed, setAllowed] = useState(false);
 
-  if (auth.isLoading) {
+  useEffect(() => {
+    if (!decodeHostToken()) {
+      setChecking(false);
+      setAllowed(false);
+      return;
+    }
+    fetchAdmins()
+      .then(() => {
+        setAllowed(true);
+        setChecking(false);
+      })
+      .catch(() => {
+        setAllowed(false);
+        setChecking(false);
+      });
+  }, [identity?.sub]);
+
+  if (checking) {
     return (
       <section className="panel admin-unlock">
         <h2>Admin</h2>
@@ -720,7 +622,7 @@ function AdminGate({
     );
   }
 
-  if (!auth.user) {
+  if (!decodeHostToken()) {
     return (
       <section className="panel admin-unlock">
         <div>
@@ -737,25 +639,15 @@ function AdminGate({
     );
   }
 
-  const adminIdentities = (adminIdentityQuery.data?.admins ?? []) as AdminIdentity[];
-  if (adminIdentityQuery.isLoading) {
-    return (
-      <section className="panel admin-unlock">
-        <h2>Admin</h2>
-        <p className="muted">Checking admin membership for {auth.user.email}...</p>
-      </section>
-    );
-  }
-
-  if (adminIdentities.length === 0) {
+  if (!allowed) {
     return (
       <section className="panel admin-unlock">
         <div>
           <span className="eyebrow">Admin</span>
           <h2>Access denied</h2>
           <p className="muted">
-            {auth.user.email} is signed in, but is not linked to an admin identity.
-            Add this user in the Instant dashboard or ask an existing admin to add it.
+            {identity?.email ?? "This account"} is signed in, but is not an admin.
+            Ask an existing admin to add it.
           </p>
         </div>
         <button className="secondary" onClick={onExit}>
@@ -767,7 +659,6 @@ function AdminGate({
 
   return (
     <AdminConsole
-      authUser={auth.user}
       onRoom={onRoom}
       onError={onError}
       onExit={onExit}
@@ -776,12 +667,10 @@ function AdminGate({
 }
 
 function AdminConsole({
-  authUser,
   onRoom,
   onError,
   onExit,
 }: {
-  authUser: User;
   onRoom: (code: string) => void;
   onError: (error: string) => void;
   onExit: () => void;
@@ -790,28 +679,37 @@ function AdminConsole({
   const [newAdminEmail, setNewAdminEmail] = useState("");
   const [newAdminNote, setNewAdminNote] = useState("");
   const [adminNotice, setAdminNotice] = useState("");
-  const [deleteConfirmRoomId, setDeleteConfirmRoomId] = useState<string | null>(null);
-  const adminQuery = db!.useQuery({
-    rooms: { $: { order: { updatedAt: "desc" } } },
-    players: {},
-    submissions: {},
-    judgments: {},
-    admins: { $: { order: { createdAt: "asc" } } },
-  });
+  const [deleteConfirmRoomCode, setDeleteConfirmRoomCode] = useState<string | null>(null);
+  const [rows, setRows] = useState<AdminRoomRow[]>([]);
+  const [admins, setAdmins] = useState<AdminIdentity[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  const rooms = (adminQuery.data?.rooms ?? []) as Room[];
-  const players = (adminQuery.data?.players ?? []) as Player[];
-  const submissions = (adminQuery.data?.submissions ?? []) as Submission[];
-  const judgments = (adminQuery.data?.judgments ?? []) as Judgment[];
-  const admins = (adminQuery.data?.admins ?? []) as AdminIdentity[];
-  const visibleRooms = rooms.filter((room) => {
+  async function reload() {
+    setLoading(true);
+    try {
+      const [roomRows, adminList] = await Promise.all([fetchAdminRooms(), fetchAdmins()]);
+      setRows(roomRows);
+      setAdmins(adminList);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Could not load admin data");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void reload();
+  }, []);
+
+  const rooms = rows.map((row) => row.room);
+  const visibleRooms = rows.filter(({ room }) => {
     switch (filter) {
       case "active":
         return !room.archivedAt && room.status !== "finished";
       case "stale":
         return !room.archivedAt && isStaleRoom(room);
       case "unlinked":
-        return !room.archivedAt && isOldUnlinkedRoom(room);
+        return !room.archivedAt && isUnlinkedRoom(room);
       case "finished":
         return !room.archivedAt && room.status === "finished";
       case "archived":
@@ -825,19 +723,15 @@ function AdminConsole({
     open: rooms.filter((room) => !room.archivedAt).length,
     active: rooms.filter((room) => !room.archivedAt && room.status !== "finished").length,
     stale: rooms.filter((room) => !room.archivedAt && isStaleRoom(room)).length,
-    unlinked: rooms.filter((room) => !room.archivedAt && isOldUnlinkedRoom(room)).length,
+    unlinked: rooms.filter((room) => !room.archivedAt && isUnlinkedRoom(room)).length,
     finished: rooms.filter((room) => !room.archivedAt && room.status === "finished").length,
     archived: rooms.filter((room) => room.archivedAt).length,
   };
 
   async function updateRoom(room: Room, patch: Partial<Room>) {
     try {
-      await db!.transact(
-        tx.rooms[room.id].update({
-          ...patch,
-          updatedAt: Date.now(),
-        }),
-      );
+      await adminUpdateRoom(room.code, patch);
+      await reload();
     } catch (error) {
       onError(error instanceof Error ? error.message : "Admin action failed");
     }
@@ -870,66 +764,33 @@ function AdminConsole({
   }
 
   async function cleanupStale() {
-    const staleRooms = rooms.filter((room) => !room.archivedAt && isStaleRoom(room));
-    if (staleRooms.length === 0) return;
-    const now = Date.now();
+    if (counts.stale === 0) return;
     try {
-      await db!.transact(
-        staleRooms.map((room) =>
-          tx.rooms[room.id].update({
-            archivedAt: now,
-            hiddenFromHostHistory: true,
-            cleanupReason: `Archived by stale cleanup after ${formatDuration(now - room.updatedAt)} without updates.`,
-            updatedAt: now,
-          }),
-        ),
-      );
+      const { archived } = await adminCleanup("stale");
+      setAdminNotice(`Archived ${archived} stale game${archived === 1 ? "" : "s"}.`);
+      await reload();
     } catch (error) {
       onError(error instanceof Error ? error.message : "Cleanup failed");
     }
   }
 
   async function cleanupOldFinished() {
-    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
-    const oldFinished = rooms.filter(
-      (room) =>
-        !room.archivedAt &&
-        room.status === "finished" &&
-        (room.finishedAt ?? room.updatedAt) < cutoff,
-    );
-    if (oldFinished.length === 0) return;
-    const now = Date.now();
+    if (counts.finished === 0) return;
     try {
-      await db!.transact(
-        oldFinished.map((room) =>
-          tx.rooms[room.id].update({
-            archivedAt: now,
-            hiddenFromHostHistory: true,
-            cleanupReason: "Archived by old finished game cleanup.",
-            updatedAt: now,
-          }),
-        ),
-      );
+      const { archived } = await adminCleanup("oldFinished");
+      setAdminNotice(`Archived ${archived} old finished game${archived === 1 ? "" : "s"}.`);
+      await reload();
     } catch (error) {
       onError(error instanceof Error ? error.message : "Cleanup failed");
     }
   }
 
   async function cleanupOldUnlinked() {
-    const oldUnlinked = rooms.filter((room) => !room.archivedAt && isOldUnlinkedRoom(room));
-    if (oldUnlinked.length === 0) return;
-    const now = Date.now();
+    if (counts.unlinked === 0) return;
     try {
-      await db!.transact(
-        oldUnlinked.map((room) =>
-          tx.rooms[room.id].update({
-            archivedAt: now,
-            hiddenFromHostHistory: true,
-            cleanupReason: `Archived unlinked game after ${formatDuration(now - room.updatedAt)} without a host account link.`,
-            updatedAt: now,
-          }),
-        ),
-      );
+      const { archived } = await adminCleanup("unlinked");
+      setAdminNotice(`Archived ${archived} unlinked game${archived === 1 ? "" : "s"}.`);
+      await reload();
     } catch (error) {
       onError(error instanceof Error ? error.message : "Cleanup failed");
     }
@@ -944,20 +805,10 @@ function AdminConsole({
 
   async function deleteGame(room: Room) {
     try {
-      await db!.transact([
-        ...judgments
-          .filter((judgment) => judgment.roomId === room.id)
-          .map((judgment) => tx.judgments[judgment.id].delete()),
-        ...submissions
-          .filter((submission) => submission.roomId === room.id)
-          .map((submission) => tx.submissions[submission.id].delete()),
-        ...players
-          .filter((player) => player.roomId === room.id)
-          .map((player) => tx.players[player.id].delete()),
-        tx.rooms[room.id].delete(),
-      ]);
-      setDeleteConfirmRoomId(null);
+      await adminDeleteRoom(room.code);
+      setDeleteConfirmRoomCode(null);
       setAdminNotice(`Deleted game ${room.code}.`);
+      await reload();
     } catch (error) {
       onError(error instanceof Error ? error.message : "Could not delete game");
     }
@@ -967,18 +818,10 @@ function AdminConsole({
     const email = newAdminEmail.trim().toLowerCase();
     if (!email) return;
     try {
-      await db!.transact(
-        tx.admins[id()]
-          .update({
-            email,
-            note: newAdminNote.trim(),
-            createdAt: Date.now(),
-            createdBy: authUser.email ?? authUser.id,
-          })
-          .link({ user: lookup("email", email) }),
-      );
+      await addAdminIdentity(email, newAdminNote.trim());
       setNewAdminEmail("");
       setNewAdminNote("");
+      await reload();
     } catch (error) {
       onError(error instanceof Error ? error.message : "Could not add admin");
     }
@@ -986,7 +829,8 @@ function AdminConsole({
 
   async function removeAdmin(admin: AdminIdentity) {
     try {
-      await db!.transact(tx.admins[admin.id].delete());
+      await removeAdminIdentity(admin.id);
+      await reload();
     } catch (error) {
       onError(error instanceof Error ? error.message : "Could not remove admin");
     }
@@ -1051,7 +895,7 @@ function AdminConsole({
           <div>
             <h3>Games</h3>
             <p className="muted">
-              {adminQuery.isLoading ? "Loading..." : `${visibleRooms.length} shown of ${counts.total}`}
+              {loading ? "Loading..." : `${visibleRooms.length} shown of ${counts.total}`}
             </p>
           </div>
         </div>
@@ -1063,21 +907,18 @@ function AdminConsole({
         {visibleRooms.length === 0 ? (
           <p className="muted">No games match this filter.</p>
         ) : (
-          visibleRooms.map((room) => {
-            const roomPlayers = players.filter((player) => player.roomId === room.id);
-            const roomSubmissions = submissions.filter((submission) => submission.roomId === room.id);
-            const roomJudgments = judgments.filter((judgment) => judgment.roomId === room.id);
+          visibleRooms.map(({ room, playerCount, submissionCount, judgmentCount }) => {
             return (
-              <article className="admin-row" key={room.id}>
+              <article className="admin-row" key={room.code}>
                 <div>
                   <strong>{room.code}</strong>
                   <span>{room.status.replaceAll("_", " ")}</span>
                   {room.archivedAt ? <small>Archived {new Date(room.archivedAt).toLocaleString()}</small> : null}
                 </div>
                 <div className="admin-meta">
-                  <span>{roomPlayers.length} players</span>
-                  <span>{roomSubmissions.length} submissions</span>
-                  <span>{roomJudgments.length} judgments</span>
+                  <span>{playerCount} players</span>
+                  <span>{submissionCount} submissions</span>
+                  <span>{judgmentCount} judgments</span>
                   <span>Updated {formatDuration(Date.now() - room.updatedAt)} ago</span>
                 </div>
                 <div className="admin-actions">
@@ -1101,17 +942,17 @@ function AdminConsole({
                       Archive
                     </button>
                   )}
-                  {deleteConfirmRoomId === room.id ? (
+                  {deleteConfirmRoomCode === room.code ? (
                     <>
                       <button className="secondary danger-action" onClick={() => deleteGame(room)}>
                         Confirm delete
                       </button>
-                      <button className="secondary" onClick={() => setDeleteConfirmRoomId(null)}>
+                      <button className="secondary" onClick={() => setDeleteConfirmRoomCode(null)}>
                         Cancel
                       </button>
                     </>
                   ) : (
-                    <button className="secondary danger-action" onClick={() => setDeleteConfirmRoomId(room.id)}>
+                    <button className="secondary danger-action" onClick={() => setDeleteConfirmRoomCode(room.code)}>
                       Delete
                     </button>
                   )}
@@ -1128,9 +969,9 @@ function AdminConsole({
           <div>
             <h3>Admin identities</h3>
             <p className="muted">
-              Admins are Instant users linked by email. Permissions are enforced
-              with <code>auth.ref("$user.adminRecords.id")</code>. The target user
-              must have signed in at least once.
+              Admins are organization users authenticated via OIDC. Admin rights
+              can also be provisioned through SCIM or <code>ADMIN_EMAILS</code> on
+              the backend.
             </p>
           </div>
         </div>
@@ -1215,10 +1056,10 @@ function RoomView({
   judgments,
   me,
   isHost,
-  authUser,
   onError,
   readOnly,
   playersLoaded,
+  connected,
   narratorEnabled,
   onNarratorChange,
 }: {
@@ -1229,47 +1070,13 @@ function RoomView({
   judgments: Judgment[];
   me?: Player;
   isHost: boolean;
-  authUser?: User | null;
   onError: (error: string) => void;
   readOnly: boolean;
   playersLoaded: boolean;
+  connected: boolean;
   narratorEnabled: boolean;
   onNarratorChange: (enabled: boolean) => void;
 }) {
-  useEffect(() => {
-    if (readOnly || !playersLoaded || me) return;
-    const name = localStorage.getItem("jba.name") ?? (isHost ? room.hostName : "Guest");
-    const now = Date.now();
-    void db!.transact(
-      tx.players[id()].update({
-        roomId: room.id,
-        clientId: localClientId,
-        name,
-        seatIndex: isHost ? 0 : players.length,
-        isHost,
-        connected: true,
-        ready: isHost,
-        score: 0,
-        survivalCount: 0,
-        deathCount: 0,
-        joinedAt: now,
-        lastSeenAt: now,
-      }),
-    );
-  }, [room.id, me?.id, isHost, players.length, readOnly, playersLoaded]);
-
-  useEffect(() => {
-    if (readOnly || !isHost || !authUser || room.hostUserId) return;
-    void db!.transact(
-      tx.rooms[room.id].update({
-        hostUserId: authUser.id,
-        ...(authUser.email ? { hostEmail: authUser.email } : {}),
-        hiddenFromHostHistory: false,
-        updatedAt: Date.now(),
-      }),
-    );
-  }, [readOnly, isHost, authUser?.id, authUser?.email, room.id, room.hostUserId]);
-
   const activePlayer = activePlayerForRoom(room, players);
   const isActivePlayer = Boolean(me && activePlayer?.id === me.id);
   const canControlRound = isHost || isActivePlayer;
@@ -1293,13 +1100,13 @@ function RoomView({
     }
 
     if (allPlayersSubmitted(players, roundSubmissions)) {
-      void closeSubmissions(room, players, roundSubmissions);
+      void closeSubmissions(room.code).catch(() => undefined);
       return;
     }
 
     const delay = Math.max(0, room.deadlineAt - Date.now()) + 1_000;
     const timeout = window.setTimeout(() => {
-      void closeSubmissions(room, players, roundSubmissions);
+      void closeSubmissions(room.code).catch(() => undefined);
     }, delay);
     return () => window.clearTimeout(timeout);
   }, [
@@ -1322,6 +1129,9 @@ function RoomView({
           <strong>{room.code}</strong>
         </div>
         <div className="status">{room.status.replaceAll("_", " ")}</div>
+        {!readOnly && (
+          <div className="muted">{connected ? "Live" : me ? "Reconnecting..." : "Joining..."}</div>
+        )}
         {activePlayer && room.status !== "lobby" && (
           <div className="active-player">
             <span>Active player</span>
@@ -1330,7 +1140,9 @@ function RoomView({
         )}
         <PlayerList players={players} submittedIds={roundSubmissions.map((s) => s.playerId)} />
         <NarratorToggle enabled={narratorEnabled} onChange={onNarratorChange} />
-        {(isHost || canControlRound) && <AiSettingsLauncher />}
+        {(isHost || canControlRound) && !readOnly && (
+          <p className="muted setup-note">The backend judge runs with a server-side key.</p>
+        )}
       </aside>
       <section className="stage">
         {room.status === "lobby" ? (
@@ -1351,6 +1163,7 @@ function RoomView({
             judgments={judgments}
             isHost={isHost}
             readOnly={readOnly}
+            onError={onError}
           />
         ) : (
           <RoundView
@@ -1423,39 +1236,26 @@ function Lobby({
   readOnly: boolean;
   onError: (error: string) => void;
 }) {
-  const [checkingAi, setCheckingAi] = useState(false);
+  const [starting, setStarting] = useState(false);
 
   async function toggleReady() {
     if (!me || readOnly) return;
-    await db!.transact(tx.players[me.id].update({ ready: !me.ready }));
+    try {
+      await setReady(room.code, me.id, !me.ready);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Could not update ready state");
+    }
   }
 
   async function startGame() {
-    if (readOnly || checkingAi) return;
-    setCheckingAi(true);
-    const scenario = pickScenario(1);
-    const activePlayer = players[0];
+    if (readOnly || starting) return;
+    setStarting(true);
     try {
-      await testAiEndpoint(loadAiSettings());
-      await db!.transact(
-        tx.rooms[room.id].update({
-          status: "round_intro",
-          roundIndex: 1,
-          revealIndex: 0,
-          activePlayerId: activePlayer?.id,
-          scenarioTitle: scenario.title,
-          scenarioText: scenario.scenarioText,
-          immediateThreat: scenario.immediateThreat,
-          timePressure: scenario.timePressure,
-          category: scenario.category,
-          bannedWords: bannedWordsForRound(1),
-          updatedAt: Date.now(),
-        }),
-      );
+      await startGameOnServer(room.code);
     } catch (error) {
-      onError(error instanceof Error ? error.message : "AI endpoint test failed.");
+      onError(error instanceof Error ? error.message : "Could not start game.");
     } finally {
-      setCheckingAi(false);
+      setStarting(false);
     }
   }
 
@@ -1466,12 +1266,6 @@ function Lobby({
         {players.length} player{players.length === 1 ? "" : "s"} joined. The host
         starts the game, then round control rotates between players.
       </p>
-      {isHost && (
-        <p className="setup-note">
-          Start game runs a quick AI endpoint test first. If it fails, open AI
-          settings and test the judge before trying again.
-        </p>
-      )}
       <div className="actions">
         {!isHost && (
           <button className={me?.ready ? "secondary" : ""} onClick={toggleReady}>
@@ -1479,8 +1273,8 @@ function Lobby({
           </button>
         )}
         {isHost && (
-          <button disabled={checkingAi} onClick={startGame}>
-            {checkingAi ? "Checking AI..." : "Start game"}
+          <button disabled={starting} onClick={startGame}>
+            {starting ? "Starting..." : "Start game"}
           </button>
         )}
       </div>
@@ -1522,6 +1316,7 @@ function RoundView({
           canControl={canControl}
           activePlayer={activePlayer}
           readOnly={readOnly}
+          onError={onError}
         />
       )}
       {room.status === "submitting" && (
@@ -1533,6 +1328,7 @@ function RoundView({
           submission={submissions.find((s) => s.playerId === me?.id)}
           canControl={canControl}
           readOnly={readOnly}
+          onError={onError}
         />
       )}
       {room.status === "judging" && (
@@ -1554,6 +1350,7 @@ function RoundView({
           canControl={canControl}
           readOnly={readOnly}
           narratorEnabled={narratorEnabled}
+          onError={onError}
         />
       )}
       {(room.status === "scoreboard" || room.status === "finished") && (
@@ -1564,6 +1361,7 @@ function RoundView({
           judgments={judgments}
           canControl={canControl}
           readOnly={readOnly}
+          onError={onError}
         />
       )}
     </>
@@ -1621,54 +1419,59 @@ function IntroControls({
   canControl,
   activePlayer,
   readOnly,
+  onError,
 }: {
   room: Room;
   canControl: boolean;
   activePlayer?: Player;
   readOnly: boolean;
+  onError: (error: string) => void;
 }) {
   const [customPrompt, setCustomPrompt] = useState("");
 
   async function openSubmissions() {
     if (readOnly || !canControl) return;
-    await db!.transact(
-      tx.rooms[room.id].update({
+    try {
+      await controlRoom(room.code, {
         status: "submitting",
         deadlineAt: Date.now() + room.submissionSeconds * 1000,
-        updatedAt: Date.now(),
-      }),
-    );
+      });
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Could not open submissions");
+    }
   }
 
   async function rerollPrompt() {
     if (readOnly || !canControl) return;
     const scenario = pickScenario(room.roundIndex + Math.floor(Math.random() * 4) + 1);
-    await db!.transact(
-      tx.rooms[room.id].update({
+    try {
+      await controlRoom(room.code, {
         scenarioTitle: scenario.title,
         scenarioText: scenario.scenarioText,
         immediateThreat: scenario.immediateThreat,
         timePressure: scenario.timePressure,
         category: scenario.category,
-        updatedAt: Date.now(),
-      }),
-    );
+      });
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Could not reroll prompt");
+    }
   }
 
   async function useCustomPrompt() {
     if (readOnly || !canControl || customPrompt.trim().length < 12) return;
     const text = customPrompt.trim().slice(0, 220);
-    await db!.transact(
-      tx.rooms[room.id].update({
+    try {
+      await controlRoom(room.code, {
         scenarioTitle: "Custom calamity",
         scenarioText: text,
         immediateThreat: "The danger is immediate.",
         timePressure: `${room.submissionSeconds} seconds.`,
         category: "custom",
-        updatedAt: Date.now(),
-      }),
-    );
-    setCustomPrompt("");
+      });
+      setCustomPrompt("");
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Could not set prompt");
+    }
   }
 
   if (!canControl) {
@@ -1722,6 +1525,7 @@ function SubmitPanel({
   submission,
   canControl,
   readOnly,
+  onError,
 }: {
   room: Room;
   players: Player[];
@@ -1730,6 +1534,7 @@ function SubmitPanel({
   submission?: Submission;
   canControl: boolean;
   readOnly: boolean;
+  onError: (error: string) => void;
 }) {
   const [text, setText] = useState(submission?.text ?? "");
   const [saving, setSaving] = useState(false);
@@ -1764,21 +1569,12 @@ function SubmitPanel({
     ) {
       return;
     }
-    const now = Date.now();
     setSaving(true);
     try {
-      await db!.transact(
-        tx.submissions[submission?.id ?? id()].update({
-          roomId: room.id,
-          roundIndex: room.roundIndex,
-          playerId: me.id,
-          clientId: localClientId,
-          text: trimmedText.slice(0, 500),
-          submittedAt: now,
-          locked: false,
-        }),
-      );
-      setSavedAt(now);
+      const saved = await submitText(room.code, { playerId: me.id, text: trimmedText.slice(0, 500) });
+      setSavedAt(saved.submittedAt);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Could not submit");
     } finally {
       setSaving(false);
     }
@@ -1821,7 +1617,11 @@ function SubmitPanel({
 
   async function close() {
     if (readOnly) return;
-    await closeSubmissions(room, players, submissions);
+    try {
+      await closeSubmissions(room.code);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Could not close submissions");
+    }
   }
 
   return (
@@ -1887,65 +1687,12 @@ function JudgingPanel({
   const [running, setRunning] = useState(false);
 
   async function runJudging() {
-    if (readOnly) return;
+    if (readOnly || running) return;
     setRunning(true);
     try {
-      const settings = loadAiSettings();
-      const chunks = [];
-      const completeSubmissions = [...submissions];
-      for (const player of players) {
-        if (!completeSubmissions.some((submission) => submission.playerId === player.id)) {
-          completeSubmissions.push(panicSubmission(player.id, room.id, room.roundIndex));
-        }
-      }
-
-      for (const submission of completeSubmissions) {
-        if (!submissions.some((existing) => existing.id === submission.id)) {
-          const { id: _ignored, ...submissionData } = submission;
-          chunks.push(tx.submissions[id()].update(submissionData));
-        }
-      }
-
-      for (const submission of completeSubmissions) {
-        const player = players.find((candidate) => candidate.id === submission.playerId);
-        let judgment: Omit<Judgment, "id" | "createdAt">;
-        try {
-          judgment = await judgeSubmission({
-            settings,
-            scenario: {
-              title: room.scenarioTitle ?? "",
-              scenarioText: room.scenarioText ?? "",
-              immediateThreat: room.immediateThreat ?? "",
-              timePressure: room.timePressure ?? "",
-            },
-            submission,
-            playerName: player?.name ?? "Player",
-            difficulty: room.difficulty,
-          });
-        } catch (error) {
-          onError(error instanceof Error ? error.message : "AI judging failed; using mock judgment");
-          judgment = mockJudgment({ submission, difficulty: room.difficulty });
-        }
-        chunks.push(tx.judgments[id()].update({ ...judgment, createdAt: Date.now() }));
-        if (player) {
-          chunks.push(
-            tx.players[player.id].update({
-              score: player.score + judgment.pointsAwarded,
-              survivalCount: player.survivalCount + (judgment.survived ? 1 : 0),
-              deathCount: player.deathCount + (judgment.survived ? 0 : 1),
-            }),
-          );
-        }
-      }
-
-      chunks.push(
-        tx.rooms[room.id].update({
-          status: "revealing",
-          revealIndex: 1,
-          updatedAt: Date.now(),
-        }),
-      );
-      await db!.transact(chunks);
+      await requestJudge(room.code);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "AI judging failed");
     } finally {
       setRunning(false);
     }
@@ -1956,7 +1703,7 @@ function JudgingPanel({
       <h3>Judging</h3>
       <p className="muted">
         {canControl
-          ? "Run the judge from this browser. Your AI token stays local."
+          ? "Run the backend judge. Scores appear in the reveal."
           : "The active player is judging submissions."}
       </p>
       {canControl && (
@@ -1976,6 +1723,7 @@ function RevealPanel({
   canControl,
   readOnly,
   narratorEnabled,
+  onError,
 }: {
   room: Room;
   players: Player[];
@@ -1984,14 +1732,19 @@ function RevealPanel({
   canControl: boolean;
   readOnly: boolean;
   narratorEnabled: boolean;
+  onError?: (error: string) => void;
 }) {
   const visiblePlayers = players.slice(0, room.revealIndex);
+  const [advancing, setAdvancing] = useState(false);
   async function advance() {
-    if (readOnly) return;
-    if (room.revealIndex < players.length) {
-      await db!.transact(tx.rooms[room.id].update({ revealIndex: room.revealIndex + 1 }));
-    } else {
-      await db!.transact(tx.rooms[room.id].update({ status: "scoreboard", updatedAt: Date.now() }));
+    if (readOnly || advancing) return;
+    setAdvancing(true);
+    try {
+      await advanceReveal(room.code);
+    } catch (error) {
+      onError?.(error instanceof Error ? error.message : "Could not advance reveal");
+    } finally {
+      setAdvancing(false);
     }
   }
   return (
@@ -2003,7 +1756,7 @@ function RevealPanel({
         autoNarrate={narratorEnabled}
         suspenseReveal
       />
-      {canControl && <button onClick={advance}>Advance reveal</button>}
+      {canControl && <button disabled={advancing} onClick={advance}>{advancing ? "Advancing..." : "Advance reveal"}</button>}
     </div>
   );
 }
@@ -2015,6 +1768,7 @@ function Scoreboard({
   judgments,
   canControl,
   readOnly,
+  onError,
 }: {
   room: Room;
   players: Player[];
@@ -2022,36 +1776,20 @@ function Scoreboard({
   judgments: Judgment[];
   canControl: boolean;
   readOnly: boolean;
+  onError: (error: string) => void;
 }) {
   const leaders = [...players].sort((a, b) => b.score - a.score);
+  const [moving, setMoving] = useState(false);
   async function next() {
-    if (readOnly) return;
-    if (room.roundIndex >= room.roundCount) {
-      const now = Date.now();
-      await db!.transact(
-        tx.rooms[room.id].update({ status: "finished", finishedAt: now, updatedAt: now }),
-      );
-      return;
+    if (readOnly || moving) return;
+    setMoving(true);
+    try {
+      await nextRound(room.code);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Could not advance round");
+    } finally {
+      setMoving(false);
     }
-    const nextIndex = room.roundIndex + 1;
-    const scenario = pickScenario(nextIndex);
-    const nextActivePlayer = activePlayerForRound(players, nextIndex);
-    await db!.transact(
-      tx.rooms[room.id].update({
-        status: "round_intro",
-        roundIndex: nextIndex,
-        revealIndex: 0,
-        deadlineAt: 0,
-        activePlayerId: nextActivePlayer?.id,
-        scenarioTitle: scenario.title,
-        scenarioText: scenario.scenarioText,
-        immediateThreat: scenario.immediateThreat,
-        timePressure: scenario.timePressure,
-        category: scenario.category,
-        bannedWords: bannedWordsForRound(nextIndex),
-        updatedAt: Date.now(),
-      }),
-    );
   }
 
   return (
@@ -2067,8 +1805,8 @@ function Scoreboard({
           </div>
         ))}
         {canControl && room.status !== "finished" && (
-          <button onClick={next}>
-            {room.roundIndex >= room.roundCount ? "Finish game" : "Next round"}
+          <button disabled={moving} onClick={next}>
+            {moving ? "Working..." : room.roundIndex >= room.roundCount ? "Finish game" : "Next round"}
           </button>
         )}
       </div>
@@ -2085,6 +1823,7 @@ function GameSummary({
   judgments,
   isHost,
   readOnly,
+  onError,
 }: {
   room: Room;
   players: Player[];
@@ -2093,6 +1832,7 @@ function GameSummary({
   judgments: Judgment[];
   isHost: boolean;
   readOnly: boolean;
+  onError: (error: string) => void;
 }) {
   const leaders = [...players].sort((a, b) => b.score - a.score);
   const playerNames = new Map(allPlayers.map((player) => [player.id, player.name]));
@@ -2106,12 +1846,11 @@ function GameSummary({
 
   async function hideFromHistory() {
     if (readOnly) return;
-    await db!.transact(
-      tx.rooms[room.id].update({
-        hiddenFromHostHistory: true,
-        updatedAt: Date.now(),
-      }),
-    );
+    try {
+      await hideFromHistoryOnServer(room.code);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Could not remove game");
+    }
   }
 
   return (
@@ -2209,45 +1948,6 @@ function GameSummary({
       })}
     </div>
   );
-}
-
-async function closeSubmissions(
-  room: Room,
-  players: Player[],
-  submissions: Submission[],
-) {
-  if (room.status !== "submitting") return;
-  const chunks = [];
-  const now = Date.now();
-  const submittedPlayerIds = new Set(submissions.map((submission) => submission.playerId));
-
-  for (const submission of submissions) {
-    if (!submission.locked) {
-      chunks.push(tx.submissions[submission.id].update({ locked: true }));
-    }
-  }
-
-  for (const player of players) {
-    if (submittedPlayerIds.has(player.id)) continue;
-    const panic = panicSubmission(player.id, room.id, room.roundIndex);
-    const { id: _ignored, ...panicData } = panic;
-    chunks.push(
-      tx.submissions[id()].update({
-        ...panicData,
-        submittedAt: now,
-      }),
-    );
-  }
-
-  chunks.push(
-    tx.rooms[room.id].update({
-      status: "judging",
-      deadlineAt: 0,
-      updatedAt: now,
-    }),
-  );
-
-  await db!.transact(chunks);
 }
 
 function allPlayersSubmitted(players: Player[], submissions: Submission[]) {
@@ -2446,340 +2146,6 @@ function narrateJudgment(player: Player, judgment: Judgment) {
   window.speechSynthesis.speak(utterance);
 }
 
-function AiSettingsLauncher({ compact = false }: { compact?: boolean }) {
-  const [open, setOpen] = useState(false);
-  const settings = loadAiSettings();
-  const preset = aiProviderPresets.find((candidate) => candidate.id === settings.provider);
-
-  return (
-    <>
-      <button className="secondary ai-settings-open" onClick={() => setOpen(true)}>
-        AI settings
-        {!compact && (
-          <span>
-            {(preset?.label ?? settings.provider) || "Custom"} · {settings.model || "No model"}
-          </span>
-        )}
-      </button>
-      {open && <AiSettingsModal onClose={() => setOpen(false)} />}
-    </>
-  );
-}
-
-function AiSettingsModal({ onClose }: { onClose: () => void }) {
-  const [settings, setSettings] = useState<AiSettings>(() => loadAiSettings());
-  const [models, setModels] = useState<AiModel[]>([]);
-  const [modelStatus, setModelStatus] = useState("");
-  const [testStatus, setTestStatus] = useState("");
-  const [oauthDebug, setOauthDebug] = useState<Record<string, unknown> | null>(() => openRouterOAuthDebug());
-  const [loadingModels, setLoadingModels] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [connectingOpenRouter, setConnectingOpenRouter] = useState(false);
-
-  const selectedPreset =
-    aiProviderPresets.find((preset) => preset.id === settings.provider) ?? aiProviderPresets.at(-1)!;
-  const isMock = settings.provider === "mock" || settings.model === "mock";
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
-
-  function update(patch: Partial<AiSettings>) {
-    const next = { ...settings, ...patch };
-    setSettings(next);
-    saveAiSettings(next);
-  }
-
-  function selectPreset(presetId: string) {
-    const preset = aiProviderPresets.find((candidate) => candidate.id === presetId);
-    if (!preset) return;
-    setModels([]);
-    setModelStatus("");
-    setTestStatus("");
-    update({
-      provider: preset.id,
-      baseUrl: preset.baseUrl,
-      model: preset.model,
-      responseFormat: preset.responseFormat,
-      ...(preset.id === "mock" ? { apiKey: "" } : {}),
-      httpReferer: settings.httpReferer || defaultAiSettings.httpReferer,
-      appTitle: settings.appTitle || defaultAiSettings.appTitle,
-    });
-  }
-
-  async function loadModels() {
-    setLoadingModels(true);
-    setModelStatus("");
-    setTestStatus("");
-    try {
-      const loaded = await listAiModels(settings);
-      setModels(loaded);
-      if (!loaded.length) {
-        setModelStatus("Endpoint responded, but did not return any models.");
-      } else {
-        setModelStatus(`Loaded ${loaded.length} model${loaded.length === 1 ? "" : "s"}.`);
-        if (!loaded.some((model) => model.id === settings.model)) {
-          update({ model: loaded[0].id });
-        }
-      }
-    } catch (error) {
-      setModelStatus(error instanceof Error ? error.message : "Could not load models.");
-    } finally {
-      setLoadingModels(false);
-    }
-  }
-
-  async function testEndpoint() {
-    setTesting(true);
-    setTestStatus("");
-    try {
-      setTestStatus(await testAiEndpoint(settings));
-    } catch (error) {
-      setTestStatus(error instanceof Error ? error.message : "Endpoint test failed.");
-    } finally {
-      setTesting(false);
-    }
-  }
-
-  async function connectOpenRouter() {
-    setConnectingOpenRouter(true);
-    setTestStatus("");
-    setOauthDebug(null);
-    try {
-      await startOpenRouterOAuth();
-    } catch (error) {
-      setConnectingOpenRouter(false);
-      setTestStatus(error instanceof Error ? error.message : "Could not start OpenRouter OAuth.");
-    }
-  }
-
-  return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <section
-        className="modal ai-settings-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="ai-settings-title"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className="modal-heading">
-          <div>
-            <span className="eyebrow">Host browser</span>
-            <h2 id="ai-settings-title">AI judge settings</h2>
-            <p className="muted">
-              Saved in this browser and used when the host runs judging.
-            </p>
-          </div>
-          <button className="secondary" onClick={onClose}>
-            Close
-          </button>
-        </div>
-
-        <div className="provider-grid" role="list" aria-label="AI provider presets">
-          {aiProviderPresets.map((preset) => (
-            <button
-              className={settings.provider === preset.id ? "provider-card selected" : "provider-card"}
-              key={preset.id}
-              onClick={() => selectPreset(preset.id)}
-              type="button"
-            >
-              <strong>{preset.label}</strong>
-              <span>{preset.description}</span>
-              {preset.needsToken && <small>Token required</small>}
-            </button>
-          ))}
-        </div>
-
-        <div className="ai-checklist">
-          <h3>Fastest setup</h3>
-          <ol>
-            <li>Pick OpenRouter and click Connect OpenRouter, or choose a local endpoint preset.</li>
-            <li>Load models and pick one, or type the model id directly.</li>
-            <li>Run Test endpoint before starting judging.</li>
-          </ol>
-          <p>
-            Tokens stay in this browser. Guests never see or need the host's AI key.
-          </p>
-        </div>
-
-        <div className="ai-form">
-          <label>
-            Base URL
-            <input
-              disabled={isMock}
-              placeholder="https://api.example.com/v1"
-              value={settings.baseUrl}
-              onChange={(event) =>
-                update({
-                  provider: settings.provider === "mock" ? "custom" : settings.provider,
-                  baseUrl: event.target.value,
-                })
-              }
-            />
-          </label>
-          <label>
-            API token
-            <input
-              autoComplete="off"
-              disabled={isMock}
-              placeholder={selectedPreset.needsToken ? "Required" : "Optional"}
-              type="password"
-              value={settings.apiKey}
-              onChange={(event) => update({ apiKey: event.target.value })}
-            />
-            <span className={settings.apiKey ? "field-hint ok" : "field-hint"}>
-              {settings.apiKey ? "Token saved in this browser." : "No token saved."}
-            </span>
-          </label>
-          <label>
-            Model
-            <input
-              disabled={isMock}
-              placeholder="Choose below or type a model id"
-              value={settings.model}
-              onChange={(event) => update({ model: event.target.value })}
-            />
-          </label>
-          <label>
-            Discovered models
-            <select
-              disabled={isMock || models.length === 0}
-              value={models.some((model) => model.id === settings.model) ? settings.model : ""}
-              onChange={(event) => update({ model: event.target.value })}
-            >
-              <option value="">Manual model</option>
-              {models.map((model) => (
-                <option value={model.id} key={model.id}>
-                  {model.id}
-                  {model.ownedBy ? ` (${model.ownedBy})` : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-
-        <div className="ai-actions">
-          <button
-            className="secondary"
-            disabled={connectingOpenRouter}
-            onClick={connectOpenRouter}
-          >
-            {connectingOpenRouter ? "Opening OpenRouter..." : "Connect OpenRouter"}
-          </button>
-          <button className="secondary" disabled={isMock || loadingModels} onClick={loadModels}>
-            {loadingModels ? "Loading models..." : "Load models"}
-          </button>
-          <button disabled={testing} onClick={testEndpoint}>
-            {testing ? "Testing..." : "Test endpoint"}
-          </button>
-        </div>
-
-        {(modelStatus || testStatus) && (
-          <div className="status-stack">
-            {modelStatus && <p className="submit-status">{modelStatus}</p>}
-            {testStatus && <p className="submit-status ok">{testStatus}</p>}
-          </div>
-        )}
-        {!settings.apiKey && oauthDebug && (
-          <p className="submit-status">
-            Last OpenRouter callback: code {oauthDebug.callbackHadCode ? "seen" : "missing"},
-            verifier {oauthDebug.hadVerifier ? "found" : "missing"}.
-          </p>
-        )}
-
-        <details className="advanced-settings">
-          <summary>Advanced request options</summary>
-          <div className="ai-form">
-            <label>
-              JSON mode
-              <select
-                value={settings.responseFormat}
-                onChange={(event) =>
-                  update({ responseFormat: event.target.value as AiSettings["responseFormat"] })
-                }
-              >
-                <option value="json_object">On</option>
-                <option value="none">Off</option>
-              </select>
-            </label>
-            <label>
-              HTTP-Referer
-              <input
-                value={settings.httpReferer}
-                onChange={(event) => update({ httpReferer: event.target.value })}
-              />
-            </label>
-            <label>
-              X-Title
-              <input
-                value={settings.appTitle}
-                onChange={(event) => update({ appTitle: event.target.value })}
-              />
-            </label>
-          </div>
-        </details>
-      </section>
-    </div>
-  );
-}
-
-function dedupePlayersByClient(
-  players: Player[],
-  submissions: Submission[],
-  judgments: Judgment[],
-  roundIndex?: number,
-) {
-  const submittedPlayerIds = new Set(
-    submissions
-      .filter((submission) => submission.roundIndex === roundIndex)
-      .map((submission) => submission.playerId),
-  );
-  const judgedPlayerIds = new Set(
-    judgments
-      .filter((judgment) => judgment.roundIndex === roundIndex)
-      .map((judgment) => judgment.playerId),
-  );
-  const byClient = new Map<string, Player>();
-
-  for (const player of players) {
-    const existing = byClient.get(player.clientId);
-    if (!existing || shouldReplacePlayer(existing, player, submittedPlayerIds, judgedPlayerIds)) {
-      byClient.set(player.clientId, player);
-    }
-  }
-
-  return [...byClient.values()];
-}
-
-function shouldReplacePlayer(
-  existing: Player,
-  candidate: Player,
-  submittedPlayerIds: Set<string>,
-  judgedPlayerIds: Set<string>,
-) {
-  const existingHasRoundData =
-    submittedPlayerIds.has(existing.id) || judgedPlayerIds.has(existing.id);
-  const candidateHasRoundData =
-    submittedPlayerIds.has(candidate.id) || judgedPlayerIds.has(candidate.id);
-
-  if (candidateHasRoundData !== existingHasRoundData) return candidateHasRoundData;
-  if (candidate.isHost !== existing.isHost) return candidate.isHost;
-  if (candidate.joinedAt !== existing.joinedAt) return candidate.joinedAt < existing.joinedAt;
-  return candidate.id < existing.id;
-}
-
-function getLocal(key: string, create: () => string) {
-  const existing = localStorage.getItem(key);
-  if (existing) return existing;
-  const value = create();
-  localStorage.setItem(key, value);
-  return value;
-}
-
 function getInitialRoomCode() {
   const params = new URLSearchParams(window.location.search);
   return params.get("room")?.toUpperCase() ?? localStorage.getItem("jba.roomCode") ?? "";
@@ -2809,9 +2175,9 @@ function isStaleRoom(room: Room) {
   return Date.now() - room.updatedAt > 24 * 60 * 60 * 1000;
 }
 
-function isOldUnlinkedRoom(room: Room) {
+function isUnlinkedRoom(room: Room) {
   if (room.hostUserId || room.archivedAt) return false;
-  return Date.now() - room.updatedAt > oldUnlinkedRoomMs;
+  return Date.now() - room.updatedAt > 7 * 24 * 60 * 60 * 1000;
 }
 
 function findBannedWords(text: string, bannedWords: string[]) {

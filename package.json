@@ -9,10 +9,12 @@
     "icons": "node scripts/generate-icons.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "backend:dev": "bun --hot server/src/index.ts",
+    "backend:start": "bun server/src/index.ts",
+    "backend:lint": "tsc --noEmit -p server/tsconfig.json"
   },
   "dependencies": {
-    "@instantdb/react": "^0.22.185",
     "@vitejs/plugin-react": "^5.0.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
