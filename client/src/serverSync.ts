@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import * as A from "@automerge/automerge";
 import { authHeaders, backendBase } from "./serverAuth";
 import type { Judgment, Player, Room, Submission } from "./types";
 
@@ -8,6 +9,17 @@ export type RoomSnapshot = {
   submissions: Record<string, Submission>;
   judgments: Record<string, Judgment>;
 };
+
+type SyncMessage =
+  | { type: "init"; changes: number[][] }
+  | { type: "changes"; changes: number[][] }
+  | { type: "snapshot"; doc: RoomSnapshot }
+  | { type: "ack" }
+  | { type: "missing" };
+
+function toSnapshot(doc: A.Doc<RoomSnapshot>): RoomSnapshot {
+  return JSON.parse(JSON.stringify(doc)) as RoomSnapshot;
+}
 
 export type AdminRoomRow = {
   room: Room;
@@ -161,6 +173,7 @@ export function useRoomSnapshot(code: string | null) {
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
   const [connected, setConnected] = useState(false);
   const [notFound, setNotFound] = useState(false);
+  const docRef = useRef<A.Doc<RoomSnapshot> | null>(null);
 
   useEffect(() => {
     if (!code || !backendBase()) return;
@@ -168,11 +181,30 @@ export function useRoomSnapshot(code: string | null) {
     let ws: WebSocket | null = null;
     let poll: ReturnType<typeof setInterval> | null = null;
 
+    const applyChanges = (changes: number[][]) => {
+      try {
+        const binary = changes.map((c) => new Uint8Array(c));
+        const base = docRef.current ?? A.init<RoomSnapshot>();
+        const [next] = A.applyChanges(base, binary);
+        docRef.current = next;
+        if (alive) {
+          setSnapshot(toSnapshot(next));
+          setNotFound(false);
+        }
+      } catch {
+        docRef.current = null;
+      }
+    };
+
     setSnapshot(null);
     setNotFound(false);
+    docRef.current = null;
     fetchSnapshot(code)
       .then((s) => {
-        if (alive) setSnapshot(s);
+        if (alive) {
+          docRef.current = A.from<RoomSnapshot>(s);
+          setSnapshot(s);
+        }
       })
       .catch(() => {
         if (alive) setNotFound(true);
@@ -184,8 +216,11 @@ export function useRoomSnapshot(code: string | null) {
       ws.onclose = () => alive && setConnected(false);
       ws.onmessage = (event) => {
         try {
-          const msg = JSON.parse(String(event.data)) as { type?: string; doc?: RoomSnapshot };
-          if ((msg.type === "init" || msg.type === "snapshot") && msg.doc && alive) {
+          const msg = JSON.parse(String(event.data)) as SyncMessage;
+          if ((msg.type === "init" || msg.type === "changes") && alive) {
+            applyChanges(msg.changes);
+          } else if (msg.type === "snapshot" && "doc" in msg && msg.doc && alive) {
+            docRef.current = A.from<RoomSnapshot>(msg.doc);
             setSnapshot(msg.doc);
             setNotFound(false);
           }
@@ -199,9 +234,13 @@ export function useRoomSnapshot(code: string | null) {
 
     poll = setInterval(() => {
       fetchSnapshot(code)
-        .then((s) => alive && setSnapshot(s))
+        .then((s) => {
+          if (!alive) return;
+          docRef.current = A.from<RoomSnapshot>(s);
+          setSnapshot(s);
+        })
         .catch(() => undefined);
-    }, 2500);
+    }, 5000);
 
     return () => {
       alive = false;

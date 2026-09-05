@@ -69,6 +69,29 @@ export async function deleteRoom(code: string) {
 export function setDoc(code: string, doc: A.Doc<RoomDoc>) {
   docs.set(code, doc);
   void persist(code);
+  emit(code, doc);
+}
+
+type DocListener = (doc: A.Doc<RoomDoc>) => void;
+const listeners = new Map<string, Set<DocListener>>();
+
+export function subscribe(code: string, listener: DocListener) {
+  const key = code.toUpperCase();
+  if (!listeners.has(key)) listeners.set(key, new Set());
+  listeners.get(key)!.add(listener);
+  return () => {
+    listeners.get(key)?.delete(listener);
+  };
+}
+
+function emit(code: string, doc: A.Doc<RoomDoc>) {
+  listeners.get(code.toUpperCase())?.forEach((listener) => {
+    try {
+      listener(doc);
+    } catch {
+      // ignore dead listeners
+    }
+  });
 }
 
 // Automerge rejects `undefined` property values, so strip them before
