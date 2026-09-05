@@ -3,6 +3,7 @@ import { cors } from "hono/cors";
 import { rooms } from "./routes_rooms.js";
 import { admin } from "./routes_admin.js";
 import { host } from "./routes_host.js";
+import { oidc } from "./oidc.js";
 import { scim } from "./scim.js";
 import { ensureDoc } from "./store.js";
 
@@ -21,6 +22,7 @@ app.get("/api/config", (c) =>
 app.route("/api/rooms", rooms);
 app.route("/api/host", host);
 app.route("/api/admin", admin);
+app.route("/api/auth/oidc", oidc);
 app.route("/scim/v2", scim);
 
 app.get("/sync/:code", async (c) => {

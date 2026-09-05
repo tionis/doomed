@@ -5,6 +5,7 @@ import { createDemoState, type DemoMode } from "./demo";
 import type { Judgment, Player, Room, Submission } from "./types";
 import {
   decodeHostToken,
+  finishOidcLogin,
   startOidcLogin,
   useHostIdentity,
   type HostIdentity,
@@ -59,7 +60,7 @@ function GameApp({
   adminEnabled: boolean;
   onDemo: (mode: DemoMode) => void;
 }) {
-  const { identity } = useHostIdentity();
+  const { identity, refresh } = useHostIdentity();
   const [activeCode, setActiveCode] = useState(getInitialRoomCode());
   const { snapshot, connected, notFound } = useRoomSnapshot(activeCode || null);
 
@@ -121,6 +122,19 @@ function GameApp({
   useEffect(() => {
     localStorage.setItem("jba.narrator", narratorEnabled ? "1" : "0");
   }, [narratorEnabled]);
+
+  useEffect(() => {
+    finishOidcLogin()
+      .then((finished) => {
+        if (finished) {
+          refresh();
+          setNotice("Signed in.");
+        }
+      })
+      .catch((error) => {
+        setError(error instanceof Error ? error.message : "Login failed");
+      });
+  }, []);
 
   return (
     <main>

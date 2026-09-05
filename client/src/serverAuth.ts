@@ -76,6 +76,36 @@ export async function startOidcLogin() {
   window.location.assign(url.toString());
 }
 
+export async function finishOidcLogin(): Promise<boolean> {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get("code");
+  const state = params.get("state");
+  if (!code && !params.get("error")) return false;
+  const stored = sessionStorage.getItem("doomed.oidc");
+  sessionStorage.removeItem("doomed.oidc");
+  if (params.get("error")) throw new Error(`Login failed: ${params.get("error_description") ?? params.get("error")}`);
+  if (!code || !state || !stored) throw new Error("Login callback was missing state");
+  const { verifier, state: expected } = JSON.parse(stored) as { verifier: string; state: string };
+  if (state !== expected) throw new Error("Login state mismatch; please try again");
+  const redirectUri = window.location.origin + window.location.pathname;
+  const res = await fetch(`${backendBase()}/api/auth/oidc/callback`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ code, verifier, redirectUri }),
+  });
+  if (!res.ok) throw new Error("Could not complete login");
+  const json = (await res.json()) as { idToken?: string };
+  if (!json.idToken) throw new Error("Login did not return a token");
+  setHostToken(json.idToken);
+  params.delete("code");
+  params.delete("state");
+  params.delete("session_state");
+  const url = new URL(window.location.href);
+  url.search = params.toString();
+  window.history.replaceState(null, "", url);
+  return true;
+}
+
 function randomString(len: number) {
   const bytes = new Uint8Array(len);
   crypto.getRandomValues(bytes);
