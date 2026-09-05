@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import * as A from "@automerge/automerge";
 import { verifyHostToken, type HostIdentity } from "./auth.js";
+import { isOrgAdmin } from "./scimStore.js";
 import { deleteRoom, ensureDoc, listDocs, setDoc } from "./store.js";
 
 export type AdminIdentity = {
@@ -38,6 +39,7 @@ function envAdmins(): string[] {
 export async function isAdmin(identity: HostIdentity | null): Promise<boolean> {
   if (!identity) return false;
   if (identity.email && envAdmins().includes(identity.email.toLowerCase())) return true;
+  if (identity.email && (await isOrgAdmin(identity.email))) return true;
   const admins = await readAdmins();
   if (admins.length === 0 && envAdmins().length === 0) return true;
   if (!identity.email) return false;
