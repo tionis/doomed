@@ -28,16 +28,17 @@ jobs:
         run: |
           bun install
           bun run lint
+          cd server && bun install && bun run lint
       - name: Build website
         env:
-          VITE_INSTANT_APP_ID: ${{ secrets.VITE_INSTANT_APP_ID }}
+          VITE_BACKEND_URL: ${{ secrets.VITE_BACKEND_URL }}
           VITE_BASE_PATH: /
         run: bun run build
       - name: Validate production configuration
         if: github.event_name != 'pull_request'
         env:
-          VITE_INSTANT_APP_ID: ${{ secrets.VITE_INSTANT_APP_ID }}
-        run: test -n "$VITE_INSTANT_APP_ID"
+          VITE_BACKEND_URL: ${{ secrets.VITE_BACKEND_URL }}
+        run: test -n "$VITE_BACKEND_URL"
       - name: Deploy to Bunny
         if: github.event_name != 'pull_request'
         env:
